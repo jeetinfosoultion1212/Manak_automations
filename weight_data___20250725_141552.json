@@ -1,0 +1,49 @@
+{
+  "request_no": "",
+  "job_no": "",
+  "timestamp": "2025-07-25T14:15:52.890950",
+  "sample_drawn_weight": "410",
+  "button_weight": "",
+  "weight_entries": {
+    "strip_1": {
+      "initial": "130.650",
+      "silver": "",
+      "copper": "",
+      "lead": "",
+      "cornet": "",
+      "delta": "130.650",
+      "fineness": "0.0",
+      "remarks": ""
+    },
+    "strip_2": {
+      "initial": "130.650",
+      "silver": "",
+      "copper": "",
+      "lead": "",
+      "cornet": "",
+      "delta": "130.650",
+      "fineness": "0.0",
+      "remarks": ""
+    },
+    "check_1": {
+      "initial": "",
+      "silver": "",
+      "copper": "",
+      "lead": "",
+      "cornet": "",
+      "delta": "",
+      "fineness": "",
+      "remarks": ""
+    },
+    "check_2": {
+      "initial": "",
+      "silver": "",
+      "copper": "",
+      "lead": "",
+      "cornet": "",
+      "delta": "",
+      "fineness": "",
+      "remarks": ""
+    }
+  }
+}

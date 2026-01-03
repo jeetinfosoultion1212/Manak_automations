@@ -1,0 +1,12 @@
+{
+  "username": "qmhmc14",
+  "password": "Mahalaxmi14@",
+  "firm_id": "2",
+  "api_url": "https://mahalaxmihallmarkingcentre.com/admin/get_job_report.php?job_no=",
+  "request_api_url": "https://mahalaxmihallmarkingcentre.com/admin/API/get_request_no.php?job_no=",
+  "orders_api_url": "http://localhost/manak_auto_fill/get_orders.php",
+  "report_api_url": "https://mahalaxmihallmarkingcentre.com/admin/get_report_by_id.php",
+  "api_key": "",
+  "portal_username": "",
+  "portal_password": ""
+}

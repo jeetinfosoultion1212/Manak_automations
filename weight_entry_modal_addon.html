@@ -1,0 +1,392 @@
+<!-- =================================================================== -->
+<!-- ADD THIS BEFORE THE CLOSING </body> TAG IN weight_capture.php -->
+<!-- =================================================================== -->
+
+<!-- Weight Entry Modal -->
+<div id="weightEntryModal" class="modal" style="display: none;">
+    <div class="modal-content" style="width: 95%; max-width: 1100px; max-height: 90vh; overflow: hidden; padding: 0;">
+        <!-- Modal Header -->
+        <div style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); padding: 20px; color: white; border-radius: 8px 8px 0 0;">
+            <div class="flex justify-between items-center">
+                <div>
+                    <h2 class="text-2xl font-bold flex items-center">
+                        <svg class="w-7 h-7 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 6l3 1m0 0l-3 9a5.002 5.002 0 006.001 0M6 7l3 9M6 7l6-2m6 2l3-1m-3 1l-3 9a5.002 5.002 0 006.001 0M18 7l3 9m-3-9l-6-2m0-2v2m0 16V5m0 16H9m3 0h3"/>
+                        </svg>
+                        Weight Entry System
+                    </h2>
+                    <p class="text-sm opacity-90 mt-1" id="modalJobInfoWeight"></p>
+                </div>
+                <button onclick="closeWeightModal()" class="text-white hover:bg-white hover:bg-opacity-20 rounded-full p-2 transition">
+                    <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/>
+                    </svg>
+                </button>
+            </div>
+        </div>
+
+        <div style="padding: 20px; overflow-y: auto; max-height: calc(90vh - 100px);">
+            <!-- Summary Card -->
+            <div class="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
+                <div class="bg-gradient-to-br from-blue-500 to-blue-600 rounded-lg p-4 text-white shadow-lg transform transition hover:scale-105">
+                    <div class="flex items-center justify-between">
+                        <div>
+                            <p class="text-sm opacity-90">Total Tags</p>
+                            <p class="text-3xl font-bold" id="summaryTotalTags">0</p>
+                        </div>
+                        <svg class="w-12 h-12 opacity-50" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 7h.01M7 3h5c.512 0 1.024.195 1.414.586l7 7a2 2 0 010 2.828l-7 7a.997.997 0 01-1.414 0l-7-7A1.994 1.994 0 013 12V7a4 4 0 014-4z"/>
+                        </svg>
+                    </div>
+                </div>
+
+                <div class="bg-gradient-to-br from-green-500 to-green-600 rounded-lg p-4 text-white shadow-lg transform transition hover:scale-105">
+                    <div class="flex items-center justify-between">
+                        <div>
+                            <p class="text-sm opacity-90">Filled</p>
+                            <p class="text-3xl font-bold" id="summaryFilled">0</p>
+                        </div>
+                        <svg class="w-12 h-12 opacity-50" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"/>
+                        </svg>
+                    </div>
+                </div>
+
+                <div class="bg-gradient-to-br from-orange-500 to-orange-600 rounded-lg p-4 text-white shadow-lg transform transition hover:scale-105">
+                    <div class="flex items-center justify-between">
+                        <div>
+                            <p class="text-sm opacity-90">Empty</p>
+                            <p class="text-3xl font-bold" id="summaryEmpty">0</p>
+                        </div>
+                        <svg class="w-12 h-12 opacity-50" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"/>
+                        </svg>
+                    </div>
+                </div>
+
+                <div class="bg-gradient-to-br from-purple-500 to-purple-600 rounded-lg p-4 text-white shadow-lg transform transition hover:scale-105">
+                    <div class="flex items-center justify-between">
+                        <div>
+                            <p class="text-sm opacity-90">Avg Weight</p>
+                            <p class="text-3xl font-bold" id="summaryAvgWeight">0.00</p>
+                            <p class="text-xs opacity-75">gms</p>
+                        </div>
+                        <svg class="w-12 h-12 opacity-50" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 6l3 1m0 0l-3 9a5.002 5.002 0 006.001 0M6 7l3 9M6 7l6-2m6 2l3-1m-3 1l-3 9a5.002 5.002 0 006.001 0M18 7l3 9m-3-9l-6-2m0-2v2m0 16V5m0 16H9m3 0h3"/>
+                        </svg>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Quick Actions -->
+            <div class="bg-white rounded-lg shadow-md p-4 mb-6 border border-gray-200">
+                <h3 class="font-semibold text-gray-700 mb-3 flex items-center">
+                    <svg class="w-5 h-5 mr-2 text-indigo-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z"/>
+                    </svg>
+                    Quick Actions
+                </h3>
+                <div class="flex flex-wrap gap-3">
+                    <button onclick="randomFillWeights()" class="flex-1 bg-gradient-to-r from-purple-500 to-pink-500 hover:from-purple-600 hover:to-pink-600 text-white font-semibold py-3 px-6 rounded-lg shadow-lg transform transition hover:scale-105 flex items-center justify-center">
+                        <svg class="w-5 h-5 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/>
+                        </svg>
+                        Auto-Fill Random
+                    </button>
+                    <button onclick="filterTable('empty')" class="flex-1 bg-gradient-to-r from-blue-500 to-cyan-500 hover:from-blue-600 hover:to-cyan-600 text-white font-semibold py-3 px-6 rounded-lg shadow-lg transform transition hover:scale-105 flex items-center justify-center">
+                        <svg class="w-5 h-5 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 4a1 1 0 011-1h16a1 1 0 011 1v2.586a1 1 0 01-.293.707l-6.414 6.414a1 1 0 00-.293.707V17l-4 4v-6.586a1 1 0 00-.293-.707L3.293 7.293A1 1 0 013 6.586V4z"/>
+                        </svg>
+                        Show Empty Only
+                    </button>
+                    <button onclick="filterTable('filled')" class="flex-1 bg-gradient-to-r from-green-500 to-teal-500 hover:from-green-600 hover:to-teal-600 text-white font-semibold py-3 px-6 rounded-lg shadow-lg transform transition hover:scale-105 flex items-center justify-center">
+                        <svg class="w-5 h-5 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"/>
+                        </svg>
+                        Show Filled Only
+                    </button>
+                    <button onclick="filterTable('all')" class="flex-1 bg-gradient-to-r from-gray-600 to-gray-700 hover:from-gray-700 hover:to-gray-800 text-white font-semibold py-3 px-6 rounded-lg shadow-lg transform transition hover:scale-105 flex items-center justify-center">
+                        <svg class="w-5 h-5 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 10h16M4 14h16M4 18h16"/>
+                        </svg>
+                        Show All
+                    </button>
+                </div>
+            </div>
+
+            <!-- Search Bar -->
+            <div class="mb-4">
+                <div class="relative">
+                    <input type="text" id="weightSearch" onkeyup="searchWeightTable()" placeholder="Search by Tag No, HUID, or Item..." class="w-full pl-10 pr-4 py-3 border-2 border-gray-300 rounded-lg focus:outline-none focus:border-indigo-500 transition shadow-sm">
+                    <svg class="w-5 h-5 text-gray-400 absolute left-3 top-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"/>
+                    </svg>
+                </div>
+            </div>
+
+            <!-- Weights Table -->
+            <div class="bg-white rounded-lg shadow-lg border border-gray-200 overflow-hidden">
+                <div style="overflow-x: auto; overflow-y: auto; max-height: 400px;">
+                    <table id="weightsTable" class="min-w-full divide-y divide-gray-200">
+                        <thead class="bg-gradient-to-r from-gray-50 to-gray-100 sticky top-0 z-10">
+                            <tr>
+                                <th class="px-4 py-3 text-left text-xs font-bold text-gray-700 uppercase tracking-wider">S.No</th>
+                                <th class="px-4 py-3 text-left text-xs font-bold text-gray-700 uppercase tracking-wider">Tag No</th>
+                                <th class="px-4 py-3 text-left text-xs font-bold text-gray-700 uppercase tracking-wider">HUID</th>
+                                <th class="px-4 py-3 text-left text-xs font-bold text-gray-700 uppercase tracking-wider">Item</th>
+                                <th class="px-4 py-3 text-left text-xs font-bold text-gray-700 uppercase tracking-wider">Weight (gms)</th>
+                                <th class="px-4 py-3 text-left text-xs font-bold text-gray-700 uppercase tracking-wider">Status</th>
+                            </tr>
+                        </thead>
+                        <tbody id="weightsTableBody" class="bg-white divide-y divide-gray-200">
+                            <!-- Rows will be dynamically inserted here -->
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+
+            <!-- Progress Bar -->
+            <div class="mt-6 bg-white rounded-lg shadow-md p-4 border border-gray-200">
+                <div class="flex items-center justify-between mb-2">
+                    <span class="text-sm font-semibold text-gray-700">Progress:</span>
+                    <span class="text-sm font-semibold text-indigo-600" id="progressText">0%</span>
+                </div>
+                <div class="w-full bg-gray-200 rounded-full h-3 overflow-hidden">
+                    <div id="progressBar" class="bg-gradient-to-r from-indigo-500 to-purple-600 h-3 rounded-full transition-all duration-500 shadow-inner" style="width: 0%"></div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Weight Entry JavaScript -->
+<script>
+let currentJobData = {};
+let weightsData = [];
+
+function openWeightEntryModal(jobNo, requestNo, pcs, weight) {
+    currentJobData = {
+        job_no: jobNo,
+        request_no: requestNo,
+        pcs: pcs,
+        weight: weight
+    };
+    
+    $('#modalJobInfoWeight').text(`Job: ${jobNo} | Request: ${requestNo} | Total: ${weight} gms (${pcs} pcs)`);
+    $('#weightEntryModal').fadeIn(300);
+    loadWeightsData(jobNo);
+}
+
+function closeWeightModal() {
+    $('#weightEntryModal').fadeOut(300);
+}
+
+function loadWeightsData(jobNo) {
+    $.ajax({
+        url: 'get_tag_weights.php',
+        type: 'GET',
+        data: { job_no: jobNo },
+        dataType: 'json',
+        success: function(response) {
+            if (response.success) {
+                weightsData = response.tags;
+                updateSummaryCards(response.summary);
+                renderWeightsTable(weightsData);
+            } else {
+                alert('Error: ' + response.message);
+            }
+        },
+        error: function() {
+            alert('Failed to load weights data');
+        }
+    });
+}
+
+function updateSummaryCards(summary) {
+    $('#summaryTotalTags').text(summary.total_tags);
+    $('#summaryFilled').text(summary.filled_count);
+    $('#summaryEmpty').text(summary.empty_count);
+    $('#summaryAvgWeight').text(summary.avg_weight.toFixed(2));
+    
+    const percentage = summary.total_tags > 0 ? (summary.filled_count / summary.total_tags * 100) : 0;
+    $('#progressBar').css('width', percentage + '%');
+    $('#progressText').text(Math.round(percentage) + '%');
+}
+
+function renderWeightsTable(tags) {
+    const tbody = $('#weightsTableBody');
+    tbody.empty();
+    
+    tags.forEach((tag, index) => {
+        const hasWeight = parseFloat(tag.weight) > 0;
+        const statusBadge = hasWeight 
+            ? '<span class="px-2 py-1 bg-green-100 text-green-800 text-xs font-semibold rounded-full">✓ Filled</span>'
+            : '<span class="px-2 py-1 bg-orange-100 text-orange-800 text-xs font-semibold rounded-full">○ Empty</span>';
+        
+        const row = `
+            <tr class="hover:bg-indigo-50 transition duration-150 weight-row" data-status="${hasWeight ? 'filled' : 'empty'}">
+                <td class="px-4 py-3 text-sm text-gray-900">${index + 1}</td>
+                <td class="px-4 py-3 text-sm font-semibold text-indigo-600">${tag.tag_no}</td>
+                <td class="px-4 py-3 text-sm text-gray-600">${tag.huid_code || '-'}</td>
+                <td class="px-4 py-3 text-sm text-gray-600">${tag.item || '-'}</td>
+                <td class="px-4 py-3">
+                    <input type="number" step="0.001" value="${tag.weight || ''}" 
+                           placeholder="0.000"
+                           data-tag-no="${tag.tag_no}"
+                           onblur="saveTagWeight(this, '${tag.tag_no}')"
+                           onkeypress="if(event.key === 'Enter') { this.blur(); focusNextInput(this); }"
+                           class="w-28 px-3 py-2 border-2 border-gray-300 rounded-lg focus:outline-none focus:border-indigo-500 transition text-center font-semibold">
+                </td>
+                <td class="px-4 py-3">${statusBadge}</td>
+            </tr>
+        `;
+        tbody.append(row);
+    });
+}
+
+function saveTagWeight(input, tagNo) {
+    const weight = parseFloat(input.value);
+    if (isNaN(weight) || weight <= 0) {
+        return;
+    }
+    
+    const originalValue = $(input).data('original-value') || input.defaultValue;
+    if (weight == parseFloat(originalValue)) {
+        return;
+    }
+    
+    // Show saving indicator
+    $(input).css('border-color', '#fbbf24');
+    
+    $.ajax({
+        url: 'save_tag_weight.php',
+        type: 'POST',
+        data: {
+            job_no: currentJobData.job_no,
+            tag_no: tagNo,
+            weight: weight
+        },
+        dataType: 'json',
+        success: function(response) {
+            if (response.success) {
+                $(input).css('border-color', '#10b981').data('original-value', weight);
+                
+                // Update status badge
+                const row = $(input).closest('tr');
+                row.find('td:last-child').html('<span class="px-2 py-1 bg-green-100 text-green-800 text-xs font-semibold rounded-full">✓ Filled</span>');
+                row.attr('data-status', 'filled');
+                
+                // Reload data to update summary
+                loadWeightsData(currentJobData.job_no);
+                
+                setTimeout(() => {
+                    $(input).css('border-color', '#d1d5db');
+                }, 1000);
+            } else {
+                $(input).css('border-color', '#ef4444');
+                alert('Error: ' + response.message);
+            }
+        },
+        error: function() {
+            $(input).css('border-color', '#ef4444');
+            alert('Failed to save weight');
+        }
+    });
+}
+
+function focusNextInput(currentInput) {
+    const inputs = $('input[data-tag-no]');
+    const currentIndex = inputs.index(currentInput);
+    if (currentIndex < inputs.length - 1) {
+        inputs.eq(currentIndex + 1).focus().select();
+    }
+}
+
+function randomFillWeights() {
+    if (!confirm(`Generate random weights for all empty tags based on average (${$('#summaryAvgWeight').text()} gms)?`)) {
+        return;
+    }
+    
+    $.ajax({
+        url: 'save_bulk_weights.php',
+        type: 'POST',
+        data: {
+            job_no: currentJobData.job_no,
+            total_weight: currentJobData.weight,
+            total_pcs: currentJobData.pcs
+        },
+        dataType: 'json',
+        success: function(response) {
+            if (response.success) {
+                alert(`✓ Successfully generated ${response.updated_count} random weights!`);
+                loadWeightsData(currentJobData.job_no);
+            } else {
+                alert('Error: ' + response.message);
+            }
+        },
+        error: function() {
+            alert('Failed to generate random weights');
+        }
+    });
+}
+
+function searchWeightTable() {
+    const input = $('#weightSearch').val().toLowerCase();
+    $('.weight-row').each(function() {
+        const text = $(this).text().toLowerCase();
+        $(this).toggle(text.includes(input));
+    });
+}
+
+function filterTable(filter) {
+    $('.weight-row').each(function() {
+        const status = $(this).attr('data-status');
+        if (filter === 'all') {
+            $(this).show();
+        } else {
+            $(this).toggle(status === filter);
+        }
+    });
+}
+
+// Close modal on escape key
+$(document).keydown(function(e) {
+    if (e.key === "Escape") {
+        closeWeightModal();
+    }
+});
+</script>
+
+<!-- =================================================================== -->
+<!-- STYLE MODIFICATIONS FOR EXISTING MODAL CLASS -->
+<!-- =================================================================== -->
+<style>
+.modal {
+    z-index: 9999;
+}
+
+.modal-content input:focus {
+    box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.1);
+}
+
+#weightsTable tbody tr:nth-child(even) {
+    background-color: #f9fafb;
+}
+
+/* Smooth animations */
+@keyframes fadeIn {
+    from { opacity: 0; transform: translateY(-20px); }
+    to { opacity: 1; transform: translateY(0); }
+}
+
+#weightEntryModal .modal-content {
+    animation: fadeIn 0.3s ease-out;
+}
+</style>
+
+
+
+
+
+
+

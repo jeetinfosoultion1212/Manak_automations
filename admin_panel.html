@@ -1,0 +1,425 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>MANAK Automation - Device License Admin</title>
+    <style>
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            margin: 0;
+            padding: 20px;
+            background-color: #f5f5f5;
+        }
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            background: white;
+            border-radius: 8px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+            overflow: hidden;
+        }
+        .header {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 20px;
+            text-align: center;
+        }
+        .content {
+            padding: 20px;
+        }
+        .form-group {
+            margin-bottom: 15px;
+        }
+        label {
+            display: block;
+            margin-bottom: 5px;
+            font-weight: bold;
+            color: #333;
+        }
+        input[type="text"], input[type="email"], select {
+            width: 100%;
+            padding: 10px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            font-size: 14px;
+        }
+        button {
+            background: #007bff;
+            color: white;
+            border: none;
+            padding: 10px 20px;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 14px;
+            margin-right: 10px;
+        }
+        button:hover {
+            background: #0056b3;
+        }
+        .btn-danger {
+            background: #dc3545;
+        }
+        .btn-danger:hover {
+            background: #c82333;
+        }
+        .btn-success {
+            background: #28a745;
+        }
+        .btn-success:hover {
+            background: #218838;
+        }
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-top: 20px;
+        }
+        th, td {
+            padding: 12px;
+            text-align: left;
+            border-bottom: 1px solid #ddd;
+        }
+        th {
+            background-color: #f8f9fa;
+            font-weight: bold;
+        }
+        .status-active {
+            color: #28a745;
+            font-weight: bold;
+        }
+        .status-revoked {
+            color: #dc3545;
+            font-weight: bold;
+        }
+        .status-inactive {
+            color: #6c757d;
+            font-weight: bold;
+        }
+        .alert {
+            padding: 15px;
+            margin-bottom: 20px;
+            border-radius: 4px;
+        }
+        .alert-success {
+            background-color: #d4edda;
+            border: 1px solid #c3e6cb;
+            color: #155724;
+        }
+        .alert-danger {
+            background-color: #f8d7da;
+            border: 1px solid #f5c6cb;
+            color: #721c24;
+        }
+        .tabs {
+            display: flex;
+            border-bottom: 1px solid #ddd;
+            margin-bottom: 20px;
+        }
+        .tab {
+            padding: 10px 20px;
+            cursor: pointer;
+            border: none;
+            background: none;
+            color: #666;
+        }
+        .tab.active {
+            color: #007bff;
+            border-bottom: 2px solid #007bff;
+        }
+        .tab-content {
+            display: none;
+        }
+        .tab-content.active {
+            display: block;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>🔐 MANAK Automation - Device License Admin</h1>
+            <p>Manage device licenses and user access</p>
+        </div>
+        
+        <div class="content">
+            <div class="tabs">
+                <button class="tab active" onclick="showTab('register')">📝 Register Device</button>
+                <button class="tab" onclick="showTab('manage')">⚙️ Manage Licenses</button>
+                <button class="tab" onclick="showTab('status')">📊 License Status</button>
+            </div>
+            
+            <!-- Register Device Tab -->
+            <div id="register" class="tab-content active">
+                <h2>Register New Device</h2>
+                <div id="registerAlert"></div>
+                
+                <form id="registerForm">
+                    <div class="form-group">
+                        <label for="deviceId">Device ID (MAC Address):</label>
+                        <input type="text" id="deviceId" name="deviceId" placeholder="AA:BB:CC:DD:EE:FF" required>
+                    </div>
+                    
+                    <div class="form-group">
+                        <label for="userId">User ID:</label>
+                        <input type="text" id="userId" name="userId" placeholder="user001" required>
+                    </div>
+                    
+                    <div class="form-group">
+                        <label for="licenseType">License Type:</label>
+                        <select id="licenseType" name="licenseType">
+                            <option value="standard">Standard (1 Year)</option>
+                            <option value="premium">Premium (2 Years)</option>
+                            <option value="trial">Trial (30 Days)</option>
+                        </select>
+                    </div>
+                    
+                    <div class="form-group">
+                        <label for="notes">Notes:</label>
+                        <input type="text" id="notes" name="notes" placeholder="Optional notes about this device">
+                    </div>
+                    
+                    <button type="submit" class="btn-success">✅ Register Device</button>
+                </form>
+            </div>
+            
+            <!-- Manage Licenses Tab -->
+            <div id="manage" class="tab-content">
+                <h2>Manage Device Licenses</h2>
+                <div id="manageAlert"></div>
+                
+                <div class="form-group">
+                    <label for="searchDevice">Search Device:</label>
+                    <input type="text" id="searchDevice" placeholder="Enter Device ID or User ID">
+                    <button onclick="searchDevices()">🔍 Search</button>
+                </div>
+                
+                <div id="deviceList">
+                    <!-- Device list will be populated here -->
+                </div>
+            </div>
+            
+            <!-- License Status Tab -->
+            <div id="status" class="tab-content">
+                <h2>License Status Overview</h2>
+                <div id="statusAlert"></div>
+                
+                <div class="form-group">
+                    <button onclick="loadStatus()">🔄 Refresh Status</button>
+                </div>
+                
+                <div id="statusTable">
+                    <!-- Status table will be populated here -->
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // Tab functionality
+        function showTab(tabName) {
+            // Hide all tab contents
+            const tabContents = document.querySelectorAll('.tab-content');
+            tabContents.forEach(content => content.classList.remove('active'));
+            
+            // Remove active class from all tabs
+            const tabs = document.querySelectorAll('.tab');
+            tabs.forEach(tab => tab.classList.remove('active'));
+            
+            // Show selected tab
+            document.getElementById(tabName).classList.add('active');
+            event.target.classList.add('active');
+        }
+        
+        // Register device
+        document.getElementById('registerForm').addEventListener('submit', function(e) {
+            e.preventDefault();
+            
+            const formData = new FormData();
+            formData.append('action', 'register_device');
+            formData.append('device_id', document.getElementById('deviceId').value);
+            formData.append('user_id', document.getElementById('userId').value);
+            formData.append('license_type', document.getElementById('licenseType').value);
+            formData.append('notes', document.getElementById('notes').value);
+            
+            fetch('device_license_api.php', {
+                method: 'POST',
+                body: formData
+            })
+            .then(response => response.json())
+            .then(data => {
+                if (data.success) {
+                    showAlert('registerAlert', 'Device registered successfully!', 'success');
+                    document.getElementById('registerForm').reset();
+                } else {
+                    showAlert('registerAlert', 'Error: ' + data.message, 'danger');
+                }
+            })
+            .catch(error => {
+                showAlert('registerAlert', 'Error: ' + error.message, 'danger');
+            });
+        });
+        
+        // Search devices
+        function searchDevices() {
+            const searchTerm = document.getElementById('searchDevice').value;
+            
+            fetch('device_license_api.php', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/x-www-form-urlencoded',
+                },
+                body: `action=search_devices&search=${encodeURIComponent(searchTerm)}`
+            })
+            .then(response => response.json())
+            .then(data => {
+                displayDeviceList(data.devices || []);
+            })
+            .catch(error => {
+                showAlert('manageAlert', 'Error: ' + error.message, 'danger');
+            });
+        }
+        
+        // Display device list
+        function displayDeviceList(devices) {
+            const container = document.getElementById('deviceList');
+            
+            if (devices.length === 0) {
+                container.innerHTML = '<p>No devices found.</p>';
+                return;
+            }
+            
+            let html = '<table><thead><tr><th>Device ID</th><th>User ID</th><th>Status</th><th>License Type</th><th>Created</th><th>Actions</th></tr></thead><tbody>';
+            
+            devices.forEach(device => {
+                const statusClass = `status-${device.status}`;
+                html += `
+                    <tr>
+                        <td>${device.device_id}</td>
+                        <td>${device.user_id}</td>
+                        <td class="${statusClass}">${device.status}</td>
+                        <td>${device.license_type}</td>
+                        <td>${device.created_at}</td>
+                        <td>
+                            <button onclick="revokeDevice('${device.device_id}')" class="btn-danger">Revoke</button>
+                            <button onclick="activateDevice('${device.device_id}')" class="btn-success">Activate</button>
+                        </td>
+                    </tr>
+                `;
+            });
+            
+            html += '</tbody></table>';
+            container.innerHTML = html;
+        }
+        
+        // Revoke device
+        function revokeDevice(deviceId) {
+            if (!confirm('Are you sure you want to revoke this device?')) return;
+            
+            fetch('device_license_api.php', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/x-www-form-urlencoded',
+                },
+                body: `action=revoke_device&device_id=${encodeURIComponent(deviceId)}`
+            })
+            .then(response => response.json())
+            .then(data => {
+                if (data.success) {
+                    showAlert('manageAlert', 'Device revoked successfully!', 'success');
+                    searchDevices(); // Refresh the list
+                } else {
+                    showAlert('manageAlert', 'Error: ' + data.message, 'danger');
+                }
+            })
+            .catch(error => {
+                showAlert('manageAlert', 'Error: ' + error.message, 'danger');
+            });
+        }
+        
+        // Activate device
+        function activateDevice(deviceId) {
+            fetch('device_license_api.php', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/x-www-form-urlencoded',
+                },
+                body: `action=activate_device&device_id=${encodeURIComponent(deviceId)}`
+            })
+            .then(response => response.json())
+            .then(data => {
+                if (data.success) {
+                    showAlert('manageAlert', 'Device activated successfully!', 'success');
+                    searchDevices(); // Refresh the list
+                } else {
+                    showAlert('manageAlert', 'Error: ' + data.message, 'danger');
+                }
+            })
+            .catch(error => {
+                showAlert('manageAlert', 'Error: ' + error.message, 'danger');
+            });
+        }
+        
+        // Load status
+        function loadStatus() {
+            fetch('device_license_api.php', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/x-www-form-urlencoded',
+                },
+                body: 'action=get_status_summary'
+            })
+            .then(response => response.json())
+            .then(data => {
+                displayStatusSummary(data);
+            })
+            .catch(error => {
+                showAlert('statusAlert', 'Error: ' + error.message, 'danger');
+            });
+        }
+        
+        // Display status summary
+        function displayStatusSummary(data) {
+            const container = document.getElementById('statusTable');
+            
+            let html = `
+                <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 20px; margin-bottom: 20px;">
+                    <div style="background: #e8f5e9; padding: 20px; border-radius: 8px; text-align: center;">
+                        <h3 style="color: #2e7d32; margin: 0;">${data.active || 0}</h3>
+                        <p style="margin: 5px 0 0 0; color: #2e7d32;">Active Licenses</p>
+                    </div>
+                    <div style="background: #fff3e0; padding: 20px; border-radius: 8px; text-align: center;">
+                        <h3 style="color: #f57c00; margin: 0;">${data.expired || 0}</h3>
+                        <p style="margin: 5px 0 0 0; color: #f57c00;">Expired Licenses</p>
+                    </div>
+                    <div style="background: #ffebee; padding: 20px; border-radius: 8px; text-align: center;">
+                        <h3 style="color: #c62828; margin: 0;">${data.revoked || 0}</h3>
+                        <p style="margin: 5px 0 0 0; color: #c62828;">Revoked Licenses</p>
+                    </div>
+                    <div style="background: #e3f2fd; padding: 20px; border-radius: 8px; text-align: center;">
+                        <h3 style="color: #1565c0; margin: 0;">${data.total || 0}</h3>
+                        <p style="margin: 5px 0 0 0; color: #1565c0;">Total Licenses</p>
+                    </div>
+                </div>
+            `;
+            
+            container.innerHTML = html;
+        }
+        
+        // Show alert
+        function showAlert(containerId, message, type) {
+            const container = document.getElementById(containerId);
+            container.innerHTML = `<div class="alert alert-${type}">${message}</div>`;
+            
+            // Auto-hide after 5 seconds
+            setTimeout(() => {
+                container.innerHTML = '';
+            }, 5000);
+        }
+        
+        // Load initial data
+        window.onload = function() {
+            loadStatus();
+        };
+    </script>
+</body>
+</html> 

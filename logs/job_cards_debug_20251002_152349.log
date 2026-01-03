@@ -1,0 +1,121 @@
+[2025-10-02 15:23:49] === JOB CARDS PROCESSOR INITIALIZED ===
+[2025-10-02 15:23:49] Timestamp: 2025-10-02 15:23:49.382631
+[2025-10-02 15:23:49] Python version: 3.12.7 (tags/v3.12.7:0b05ead, Oct  1 2024, 03:06:41) [MSC v.1941 64 bit (AMD64)]
+[2025-10-02 15:23:49] Working directory: C:\Users\ACER\Desktop\manak-automations25\manak-automation
+[2025-10-02 15:23:49] Script directory: C:\Users\ACER\Desktop\manak-automations25\manak-automation
+[2025-10-02 15:23:49] Log file: C:\Users\ACER\Desktop\manak-automations25\manak-automation\logs\job_cards_debug_20251002_152349.log
+[2025-10-02 15:24:28] Database connection attempt 1/3
+[2025-10-02 15:24:28] Running in executable mode: False
+[2025-10-02 15:24:29] Database connection successful on attempt 1
+[2025-10-02 15:24:51] === LOAD JOB CARDS DATA CALLED ===
+[2025-10-02 15:24:51] Firm ID set to: 1
+[2025-10-02 15:24:51] Starting worker thread...
+[2025-10-02 15:24:51] === WORKER THREAD STARTED ===
+[2025-10-02 15:24:51] Attempting database connection...
+[2025-10-02 15:24:52] Database connection attempt 1/3
+[2025-10-02 15:24:52] Running in executable mode: False
+[2025-10-02 15:24:52] Database connection successful on attempt 1
+[2025-10-02 15:29:09] Database connection attempt 1/3
+[2025-10-02 15:29:09] Running in executable mode: False
+[2025-10-02 15:29:09] Database connection successful on attempt 1
+[2025-10-02 15:29:33] === LOAD JOB CARDS DATA CALLED ===
+[2025-10-02 15:29:33] Firm ID set to: 1
+[2025-10-02 15:29:33] Starting worker thread...
+[2025-10-02 15:29:33] === WORKER THREAD STARTED ===
+[2025-10-02 15:29:33] Attempting database connection...
+[2025-10-02 15:29:33] Database connection attempt 1/3
+[2025-10-02 15:29:33] Running in executable mode: False
+[2025-10-02 15:29:34] Database connection successful on attempt 1
+[2025-10-02 15:30:37] Database connection attempt 1/3
+[2025-10-02 15:30:37] Running in executable mode: False
+[2025-10-02 15:30:38] Database connection successful on attempt 1
+[2025-10-02 15:31:01] === LOAD JOB CARDS DATA CALLED ===
+[2025-10-02 15:31:01] Firm ID set to: 1
+[2025-10-02 15:31:01] Starting worker thread...
+[2025-10-02 15:31:01] === WORKER THREAD STARTED ===
+[2025-10-02 15:31:01] Attempting database connection...
+[2025-10-02 15:31:01] Database connection attempt 1/3
+[2025-10-02 15:31:01] Running in executable mode: False
+[2025-10-02 15:31:02] Database connection successful on attempt 1
+[2025-10-02 15:31:34] Database connection attempt 1/3
+[2025-10-02 15:31:34] Running in executable mode: False
+[2025-10-02 15:31:34] Database connection successful on attempt 1
+[2025-10-02 15:31:49] Database connection attempt 1/3
+[2025-10-02 15:31:49] Running in executable mode: False
+[2025-10-02 15:31:49] Database connection successful on attempt 1
+[2025-10-02 15:31:51] Database connection attempt 1/3
+[2025-10-02 15:31:51] Running in executable mode: False
+[2025-10-02 15:31:52] Database connection successful on attempt 1
+[2025-10-02 15:31:54] Database connection attempt 1/3
+[2025-10-02 15:31:54] Running in executable mode: False
+[2025-10-02 15:31:54] Database connection successful on attempt 1
+[2025-10-02 15:31:56] Database connection attempt 1/3
+[2025-10-02 15:31:56] Running in executable mode: False
+[2025-10-02 15:31:56] Database connection successful on attempt 1
+[2025-10-02 15:31:59] Database connection attempt 1/3
+[2025-10-02 15:31:59] Running in executable mode: False
+[2025-10-02 15:31:59] Database connection successful on attempt 1
+[2025-10-02 15:32:01] Database connection attempt 1/3
+[2025-10-02 15:32:01] Running in executable mode: False
+[2025-10-02 15:32:02] Database connection successful on attempt 1
+[2025-10-02 15:32:04] Database connection attempt 1/3
+[2025-10-02 15:32:04] Running in executable mode: False
+[2025-10-02 15:32:04] Database connection successful on attempt 1
+[2025-10-02 15:32:06] Database connection attempt 1/3
+[2025-10-02 15:32:06] Running in executable mode: False
+[2025-10-02 15:32:06] Database connection successful on attempt 1
+[2025-10-02 15:32:07] === LOAD JOB CARDS DATA CALLED ===
+[2025-10-02 15:32:07] Firm ID set to: 1
+[2025-10-02 15:32:07] Starting worker thread...
+[2025-10-02 15:32:07] === WORKER THREAD STARTED ===
+[2025-10-02 15:32:07] Attempting database connection...
+[2025-10-02 15:32:07] Database connection attempt 1/3
+[2025-10-02 15:32:07] Running in executable mode: False
+[2025-10-02 15:32:08] Database connection successful on attempt 1
+[2025-10-02 15:36:27] === LOAD JOB CARDS DATA CALLED ===
+[2025-10-02 15:36:27] Firm ID set to: 1
+[2025-10-02 15:36:27] Starting worker thread...
+[2025-10-02 15:36:27] === WORKER THREAD STARTED ===
+[2025-10-02 15:36:27] Attempting database connection...
+[2025-10-02 15:36:27] Database connection attempt 1/3
+[2025-10-02 15:36:27] Running in executable mode: False
+[2025-10-02 15:36:28] Database connection successful on attempt 1
+[2025-10-02 15:36:32] Database connection attempt 1/3
+[2025-10-02 15:36:32] Running in executable mode: False
+[2025-10-02 15:36:33] Database connection successful on attempt 1
+[2025-10-02 15:36:52] === LOAD JOB CARDS DATA CALLED ===
+[2025-10-02 15:36:52] Firm ID set to: 1
+[2025-10-02 15:36:52] Starting worker thread...
+[2025-10-02 15:36:52] === WORKER THREAD STARTED ===
+[2025-10-02 15:36:52] Attempting database connection...
+[2025-10-02 15:36:52] Database connection attempt 1/3
+[2025-10-02 15:36:52] Running in executable mode: False
+[2025-10-02 15:36:53] Database connection successful on attempt 1
+[2025-10-02 15:37:27] Database connection attempt 1/3
+[2025-10-02 15:37:27] Running in executable mode: False
+[2025-10-02 15:37:28] Database connection successful on attempt 1
+[2025-10-02 15:37:51] === LOAD JOB CARDS DATA CALLED ===
+[2025-10-02 15:37:51] Firm ID set to: 1
+[2025-10-02 15:37:51] Starting worker thread...
+[2025-10-02 15:37:51] === WORKER THREAD STARTED ===
+[2025-10-02 15:37:51] Attempting database connection...
+[2025-10-02 15:37:51] Database connection attempt 1/3
+[2025-10-02 15:37:51] Running in executable mode: False
+[2025-10-02 15:37:52] Database connection successful on attempt 1
+[2025-10-02 15:37:56] Database connection attempt 1/3
+[2025-10-02 15:37:56] Running in executable mode: False
+[2025-10-02 15:37:57] Database connection successful on attempt 1
+[2025-10-02 15:38:12] Database connection attempt 1/3
+[2025-10-02 15:38:12] Running in executable mode: False
+[2025-10-02 15:38:13] Database connection successful on attempt 1
+[2025-10-02 15:38:14] Database connection attempt 1/3
+[2025-10-02 15:38:14] Running in executable mode: False
+[2025-10-02 15:38:14] Database connection successful on attempt 1
+[2025-10-02 15:38:15] === LOAD JOB CARDS DATA CALLED ===
+[2025-10-02 15:38:15] Firm ID set to: 1
+[2025-10-02 15:38:15] Starting worker thread...
+[2025-10-02 15:38:15] === WORKER THREAD STARTED ===
+[2025-10-02 15:38:15] Attempting database connection...
+[2025-10-02 15:38:15] Database connection attempt 1/3
+[2025-10-02 15:38:15] Running in executable mode: False
+[2025-10-02 15:38:16] Database connection successful on attempt 1

@@ -1,0 +1,14 @@
+[2025-10-05 23:59:29] === JOB CARDS PROCESSOR INITIALIZED ===
+[2025-10-05 23:59:29] Timestamp: 2025-10-05 23:59:29.948974
+[2025-10-05 23:59:29] Python version: 3.12.7 (tags/v3.12.7:0b05ead, Oct  1 2024, 03:06:41) [MSC v.1941 64 bit (AMD64)]
+[2025-10-05 23:59:29] Working directory: C:\Users\ACER\Desktop\manak-automations25\manak-automation
+[2025-10-05 23:59:29] Script directory: C:\Users\ACER\Desktop\manak-automations25\manak-automation
+[2025-10-05 23:59:29] Log file: C:\Users\ACER\Desktop\manak-automations25\manak-automation\logs\job_cards_debug_20251005_235929.log
+[2025-10-06 00:00:20] === LOAD JOB CARDS DATA CALLED ===
+[2025-10-06 00:00:20] Firm ID set to: 2
+[2025-10-06 00:00:20] Starting worker thread...
+[2025-10-06 00:00:20] === WORKER THREAD STARTED ===
+[2025-10-06 00:00:20] Attempting database connection...
+[2025-10-06 00:00:20] Database connection attempt 1/3
+[2025-10-06 00:00:20] Running in executable mode: False
+[2025-10-06 00:00:20] Database connection successful on attempt 1

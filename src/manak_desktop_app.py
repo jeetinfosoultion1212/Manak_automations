@@ -1,14 +1,46 @@
 #!/usr/bin/env python3
+# -*- coding: utf-8 -*-
 """
 MANAK Portal Desktop Application
 Enhanced Compact UI with Responsive Design - No Scrolling Required
 """
 
-# Fix MySQL localization issue BEFORE any imports
+# Fix MySQL localization issue and encoding BEFORE any other imports
 import os
+import sys
+
 os.environ['LANG'] = 'C'
 os.environ['LC_ALL'] = 'C'
 os.environ['LC_MESSAGES'] = 'C'
+
+# CRITICAL: Override print IMMEDIATELY to prevent Unicode errors in executable
+import builtins
+_original_print = builtins.print
+
+def safe_print(*args, **kwargs):
+    """Print function that handles Unicode encoding errors - essential for executable"""
+    try:
+        # Try normal print first
+        _original_print(*args, **kwargs)
+    except (UnicodeEncodeError, UnicodeDecodeError, LookupError):
+        # If it fails, strip Unicode and retry
+        try:
+            safe_args = []
+            for arg in args:
+                if isinstance(arg, str):
+                    # Remove ALL non-ASCII characters
+                    safe_text = arg.encode('ascii', 'ignore').decode('ascii')
+                    safe_args.append(safe_text)
+                else:
+                    safe_args.append(str(arg))
+            _original_print(*safe_args, **kwargs)
+        except:
+            # If it still fails, just skip it completely
+            pass
+
+# Replace print globally BEFORE any other code runs
+builtins.print = safe_print
+print = safe_print
 
 import tkinter as tk
 from tkinter import ttk, scrolledtext, messagebox, simpledialog
@@ -19,14 +51,19 @@ import requests
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.common.by import By
-from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support.wait import WebDriverWait
+from selenium.webdriver.support.select import Select
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.common.exceptions import TimeoutException, UnexpectedAlertPresentException, NoAlertPresentException
 import random
 import json
+import base64
 import os
 import sys
 import sqlite3
+import config
+from config import DB_CONFIG
+import portal_config
 
 # Import device licensing
 try:
@@ -66,8 +103,48 @@ except ImportError:
     print("Warning: Job cards processor module not found.")
     JobCardsProcessor = None
 
+try:
+    from processors.delivery_voucher_scanner import DeliveryVoucherScanner
+except ImportError:
+    print("Warning: Delivery voucher scanner module not found.")
+    DeliveryVoucherScanner = None
 
-__version__ = "3.0"
+try:
+    from processors.completed_jobs_scanner import CompletedJobsScanner
+except ImportError:
+    print("Warning: Completed jobs scanner module not found.")
+    CompletedJobsScanner = None
+
+try:
+    from processors.bill_import_processor import BillImportProcessor
+except ImportError:
+    print("Warning: Bill import processor module not found.")
+    BillImportProcessor = None
+
+try:
+    from processors.jeweller_request_generator import JewellerRequestGenerator
+except ImportError:
+    print("Warning: Jeweller request generator module not found.")
+    JewellerRequestGenerator = None
+
+# Import font loader
+try:
+    from utils.font_loader import load_fonts_from_directory
+except ImportError:
+    def load_fonts_from_directory(directory: str = "fonts") -> int: 
+        return 0
+
+try:
+    from utils.tag_manager import TagManager
+except ImportError:
+    print("Warning: TagManager module not found.")
+    TagManager = None
+
+
+# Removed: Portal Browser tab (not needed - using simple embedded browser in bulk jobs instead)
+
+
+__version__ = "10.0"
 
 class LoadingDialog:
     """Custom loading dialog with progress indication"""
@@ -150,6 +227,9 @@ class ManakDesktopApp:
         # Setup global exception handler to prevent crashes
         self.setup_global_exception_handler()
         
+        # Load custom fonts
+        self.load_custom_fonts()
+        
         # Setup executable-specific configurations
         self.setup_executable_config()
         
@@ -158,9 +238,20 @@ class ManakDesktopApp:
         
         # Automation state
         self.driver = None
+        self.reception_driver = None  # Second browser instance for reception tasks
         self.logged_in = False
         self.page_loaded = False
         self.license_verified = False  # Track license verification status
+        self.tag_manager = TagManager() if TagManager else None
+        
+        # API configuration variables
+        self.api_url_var = tk.StringVar()
+        self.orders_api_url_var = tk.StringVar()
+        self.api_key_var = tk.StringVar()
+        
+        # Processor initialization
+        self.bulk_jobs_processor = None
+        self.selected_credential_type = None
         
         # All weight entry field IDs from MANAK portal
         self.field_ids = {
@@ -209,6 +300,16 @@ class ManakDesktopApp:
         self.weight_capture_processor = None
         self.delivery_voucher_processor = None
         self.job_cards_processor = None
+        self.delivery_voucher_scanner = None
+        self.huid_data_processor = None
+        
+        # Initialize button references (will be set during UI setup)
+        self.auto_fill_btn = None
+        self.select_lot_btn = None
+        self.auto_workflow_btn = None
+        
+        # Initialize settings dictionary
+        self.settings = {}
         
         self.setup_ui()
         # Load saved settings
@@ -217,7 +318,7 @@ class ManakDesktopApp:
         self.clear_fields_on_start()
         
         # Update fetch button text based on initial job number
-        self.root.after(100, self.on_job_number_change)
+        # self.root.after(100, self.on_job_number_change)
         
         # Start periodic license status updates
         self.root.after(1000, self.update_license_status_display)
@@ -275,6 +376,15 @@ class ManakDesktopApp:
             import sys
             sys.exit(0)
         
+    def refresh_jewellers_list(self):
+        """Refresh jewellers list after license verification"""
+        if hasattr(self, 'jeweller_request_generator') and self.jeweller_request_generator:
+            try:
+                # Add a small delay to ensure UI is ready
+                self.root.after(500, self.jeweller_request_generator.load_jewellers)
+            except Exception as e:
+                self.log(f"⚠️ Error refreshing jewellers list: {e}", 'system')
+
     def enforce_startup_license(self):
         """Enforce license verification at application startup - Simplified version"""
         # Check for development mode (bypass license)
@@ -299,6 +409,7 @@ class ManakDesktopApp:
                 # Start periodic verification (status check only)
                 self.license_manager.start_periodic_verification(self)
                 self.log("🔄 Periodic license status monitoring started", 'status')
+                self.refresh_jewellers_list()  # Refresh jewellers list
                 return
             else:
                 print("⚠️ Cached license is no longer active")
@@ -312,6 +423,7 @@ class ManakDesktopApp:
             # Start periodic verification
             self.license_manager.start_periodic_verification(self)
             self.log("🔄 Periodic license verification started", 'status')
+            self.refresh_jewellers_list()  # Refresh jewellers list
         else:
             # License verification failed, force user to settings page
             self.force_license_setup()
@@ -435,7 +547,7 @@ class ManakDesktopApp:
 
         # MAC Address (read-only) with copy button
         ttk.Label(device_grid, text="MAC Address:", font=('Segoe UI', 9, 'bold')).grid(row=0, column=0, sticky='w', pady=2)
-        mac_address = self.license_manager.mac_address if self.license_manager else "Unknown"
+        mac_address = (self.license_manager.mac_address if self.license_manager else None) or "Unknown"
         mac_label = tk.Label(device_grid, text=mac_address, font=('Segoe UI', 9),
                            bg='#f8f9fa', fg='#495057', relief='sunken', padx=5, pady=2)
         mac_label.grid(row=0, column=1, sticky='ew', padx=(5,5), pady=2)
@@ -444,7 +556,7 @@ class ManakDesktopApp:
         
         # Device ID (read-only) with copy button
         ttk.Label(device_grid, text="Device ID:", font=('Segoe UI', 9, 'bold')).grid(row=1, column=0, sticky='w', pady=2)
-        device_id = self.license_manager.device_id if self.license_manager else "Unknown"
+        device_id = (self.license_manager.device_id if self.license_manager else None) or "Unknown"
         device_id_label = tk.Label(device_grid, text=device_id, font=('Segoe UI', 9),
                                  bg='#f8f9fa', fg='#495057', relief='sunken', padx=5, pady=2)
         device_id_label.grid(row=1, column=1, sticky='ew', padx=(5,5), pady=2)
@@ -499,7 +611,7 @@ class ManakDesktopApp:
                 # Save username in entry field
                 self.portal_username_var.set(username)
                 
-                if self.license_manager.verify_device_license(username, password):
+                if self.license_manager and self.license_manager.verify_device_license(username, password):
                     self.license_verified = True
                     
                     # Get license details for display
@@ -539,6 +651,7 @@ class ManakDesktopApp:
                     
                     # Save settings after successful verification
                     self.save_settings()
+                    self.refresh_jewellers_list()  # Refresh jewellers list
                     
                     # Close dialog after short delay
                     dialog.after(2000, dialog.destroy)
@@ -678,119 +791,154 @@ class ManakDesktopApp:
         self.style.theme_use('clam')
         
         # Color scheme
+        # Modern Color scheme
         self.colors = {
-            'primary': '#4a90e2',
-            'success': '#28a745',
-            'danger': '#dc3545',
-            'warning': '#ffc107',
-            'info': '#17a2b8',
-            'light': '#f8f9fa',
-            'dark': '#343a40',
-            'secondary': '#6c757d',
-            'accent': '#9b59b6',
-            'bg_main': '#f0f2f5',
-            'bg_card': '#ffffff',
-            'bg_input': '#f8f9fa',
-            'border': '#dee2e6',
-            'text_primary': '#212529',
-            'text_secondary': '#6c757d'
+            'primary': '#0ea5e9',       # Modern Sky Blue
+            'primary_dark': '#0284c7',  # Darker Blue for pressed
+            'success': '#10b981',       # Emerald Green
+            'danger': '#ef4444',        # Rose Red
+            'warning': '#f59e0b',       # Amber
+            'info': '#3b82f6',          # Royal Blue
+            'light': '#f8fafc',         # Slate 50
+            'dark': '#1e293b',          # Slate 800
+            'secondary': '#64748b',     # Slate 500
+            'accent': '#8b5cf6',        # Violet
+            'bg_main': '#f1f5f9',       # Slate 100
+            'bg_card': '#ffffff',       # White
+            'bg_input': '#ffffff',      # White
+            'border': '#e2e8f0',        # Slate 200
+            'text_primary': '#0f172a',  # Slate 900
+            'text_secondary': '#64748b' # Slate 500
         }
         
-        default_font = ('Segoe UI', 9)
-        small_font = ('Segoe UI', 8)
-        header_font = ('Segoe UI', 10, 'bold')
+        default_font = ('Segoe UI', 10)
+        small_font = ('Segoe UI', 9)
+        header_font = ('Segoe UI', 11, 'bold')
         
         # Configure main styles
-        self.style.configure('Card.TFrame', background=self.colors['bg_card'], relief='solid', borderwidth=1)
+        self.style.configure('Card.TFrame', background=self.colors['bg_card'], relief='flat', borderwidth=0)
         self.style.configure('Header.TLabel', font=header_font, background=self.colors['bg_card'], foreground=self.colors['text_primary'])
         
         # Compact entry styles
-        large_font = ('Segoe UI', 12)
+        large_font = ('Segoe UI', 11)
         self.style.configure('Compact.TEntry', 
                            font=large_font, 
                            fieldbackground=self.colors['bg_input'], 
                            borderwidth=1, 
-                           relief='solid')
+                           relief='solid',
+                           selectbackground=self.colors['primary'],
+                           selectforeground='white')
         
         self.style.configure('Success.TEntry', 
                            font=large_font, 
-                           fieldbackground='#e8f5e8', 
+                           fieldbackground='#ecfdf5', 
                            borderwidth=1, 
                            relief='solid')
                            
         self.style.configure('Warning.TEntry', 
                            font=large_font, 
-                           fieldbackground='#fff3cd', 
+                           fieldbackground='#fffbeb', 
                            borderwidth=1, 
                            relief='solid')
         
-        # Button styles - smaller
+        # Button styles - Modern
         self.style.configure('Compact.TButton', 
                            background=self.colors['primary'], 
                            foreground='white', 
-                           font=('Segoe UI', 8, 'bold'), 
+                           font=('Segoe UI', 9, 'bold'), 
                            borderwidth=0, 
-                           padding=(8, 4))
+                           padding=(10, 6))
+        self.style.map('Compact.TButton',
+            background=[('active', self.colors['primary_dark']), ('pressed', self.colors['primary_dark'])],
+            foreground=[('active', 'white'), ('pressed', 'white')])
         
         self.style.configure('Success.TButton', 
                            background=self.colors['success'], 
                            foreground='white', 
-                           font=('Segoe UI', 8, 'bold'), 
+                           font=('Segoe UI', 9, 'bold'), 
                            borderwidth=0, 
-                           padding=(8, 4))
-        
+                           padding=(10, 6))
+        self.style.map('Success.TButton',
+            background=[('active', '#059669'), ('pressed', '#059669')],
+            foreground=[('active', 'white'), ('pressed', 'white')])
+            
         self.style.configure('Danger.TButton', 
                            background=self.colors['danger'], 
                            foreground='white', 
-                           font=('Segoe UI', 8, 'bold'), 
+                           font=('Segoe UI', 9, 'bold'), 
                            borderwidth=0, 
-                           padding=(8, 4))
-        
+                           padding=(10, 6))
+        self.style.map('Danger.TButton',
+            background=[('active', '#dc2626'), ('pressed', '#dc2626')],
+            foreground=[('active', 'white'), ('pressed', 'white')])
+
         self.style.configure('Info.TButton', 
                            background=self.colors['info'], 
                            foreground='white', 
-                           font=('Segoe UI', 8, 'bold'), 
+                           font=('Segoe UI', 9, 'bold'), 
                            borderwidth=0, 
-                           padding=(8, 4))
+                           padding=(10, 6))
+        self.style.map('Info.TButton',
+            background=[('active', '#2563eb'), ('pressed', '#2563eb')],
+            foreground=[('active', 'white'), ('pressed', 'white')])
         
         self.style.configure('Warning.TButton', 
                            background=self.colors['warning'], 
-                           foreground=self.colors['dark'], 
-                           font=('Segoe UI', 8, 'bold'), 
+                           foreground='#1e293b', 
+                           font=('Segoe UI', 9, 'bold'), 
                            borderwidth=0, 
-                           padding=(8, 4))
+                           padding=(10, 6))
+        self.style.map('Warning.TButton',
+            background=[('active', '#d97706'), ('pressed', '#d97706')],
+            foreground=[('active', 'white'), ('pressed', 'white')])
         
         # Notebook styles
-        self.style.configure('TNotebook', background=self.colors['bg_main'])
+        self.style.configure('TNotebook', background=self.colors['bg_main'], borderwidth=0)
         self.style.configure('TNotebook.Tab', 
-                           font=('Segoe UI', 9, 'bold'), 
-                           padding=[12, 6], 
-                           background=self.colors['secondary'], 
-                           foreground='white')
+                           font=('Segoe UI', 8, 'bold'), 
+                           padding=[8, 5], 
+                           background='#e2e8f0', 
+                           foreground='#64748b',
+                           borderwidth=0)
         self.style.map('TNotebook.Tab', 
-                      background=[('selected', self.colors['primary'])], 
-                      foreground=[('selected', 'white')])
+                      background=[('selected', 'white')], 
+                      foreground=[('selected', self.colors['primary'])])
         
         # LabelFrame styles - compact
         self.style.configure('Compact.TLabelframe', 
                            background=self.colors['bg_card'], 
-                           relief='solid', 
+                           relief='flat', 
                            borderwidth=1,
                            bordercolor=self.colors['border'])
         self.style.configure('Compact.TLabelframe.Label', 
-                           font=('Segoe UI', 9, 'bold'), 
+                           font=('Segoe UI', 10, 'bold'), 
                            foreground=self.colors['primary'],
                            background=self.colors['bg_card'])
         
+        # Treeview styles
+        self.style.configure("Treeview", 
+                           background="white",
+                           foreground=self.colors['text_primary'],
+                           fieldbackground="white",
+                           rowheight=30,
+                           font=('Segoe UI', 9))
+        self.style.configure("Treeview.Heading", 
+                           font=('Segoe UI', 9, 'bold'),
+                           background=self.colors['bg_main'],
+                           foreground=self.colors['text_primary'])
+        self.style.map("Treeview", 
+                      background=[('selected', self.colors['primary'])],
+                      foreground=[('selected', 'white')])
+        
         # Add custom style for Submit Manak button
         self.style.configure('SubmitManak.TButton',
-            background='#007bff',
+            background=self.colors['info'],
             foreground='white',
-            font=('Segoe UI', 10, 'bold'),
+            font=('Segoe UI', 11, 'bold'),
             borderwidth=0,
-            padding=(8, 4))
+            padding=(10, 8))
         self.style.map('SubmitManak.TButton',
-            background=[('active', '#0056b3'), ('pressed', '#0056b3'), ('!disabled', '#007bff')],
+            background=[('active', '#2563eb'), ('pressed', '#2563eb'), ('!disabled', self.colors['info'])],
             foreground=[('active', 'white'), ('pressed', 'white'), ('!disabled', 'white')])
     
     def setup_global_exception_handler(self):
@@ -840,12 +988,34 @@ class ManakDesktopApp:
                     except:
                         pass
                 
-                tk.Tk.report_callback_exception = custom_report_callback_exception
+                tk.Tk.report_callback_exception = custom_report_callback_exception  # type: ignore
             except Exception as e:
                 print(f"Failed to setup tkinter exception handler: {e}")
         
         handle_tkinter_exception()
     
+    def load_custom_fonts(self):
+        """Load custom fonts from 'fonts' directory if available"""
+        try:
+            # Look in project root 'fonts' directory
+            project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+            fonts_dir = os.path.join(project_root, 'fonts')
+            
+            if os.path.exists(fonts_dir):
+                count = load_fonts_from_directory(fonts_dir)
+                if count > 0:
+                    self.log(f"✅ Loaded {count} custom fonts from {fonts_dir}", 'system')
+                    # Could set a flag here or try to detect the font name
+                    # For now, we assume user knows the font name and might change it in code or config
+            else:
+                # Create directory so user knows where to put them
+                try:
+                    os.makedirs(fonts_dir, exist_ok=True)
+                except:
+                    pass
+        except Exception as e:
+            print(f"Error loading custom fonts: {e}")
+
     def setup_executable_config(self):
         """Setup configurations specific to executable environment"""
         try:
@@ -853,7 +1023,10 @@ class ManakDesktopApp:
             if getattr(sys, 'frozen', False):
                 # Running as executable
                 self.is_executable = True
-                self.base_path = sys._MEIPASS
+                try:
+                    self.base_path = sys._MEIPASS  # type: ignore
+                except AttributeError:
+                    self.base_path = os.path.dirname(os.path.abspath(sys.executable))
                 print(f"Running as executable from: {self.base_path}")
             else:
                 # Running as script
@@ -890,7 +1063,7 @@ class ManakDesktopApp:
         for module in critical_modules:
             try:
                 __import__(module)
-                print(f"✓ {module} imported successfully")
+                print(f"[OK] {module} imported successfully")
             except ImportError as e:
                 failed_imports.append(f"{module}: {e}")
                 print(f"✗ {module} import failed: {e}")
@@ -934,23 +1107,37 @@ class ManakDesktopApp:
         # 1. Login in MANAK Tab (Browser Control)
         self.setup_browser_tab()
         
-        # 2. Accept Request Tab
+        # 2. Jeweller Request Tab (Moved here as requested)
+        try:
+            if JewellerRequestGenerator:
+                self.jeweller_request_generator = JewellerRequestGenerator(
+                    self.notebook,  # Notebook instance
+                    None,  # Driver will be set later
+                    self.log,
+                    self.license_manager  # Pass license manager
+                )
+                self.log("✅ Jeweller Request loaded successfully", 'system')
+        except Exception as e:
+            self.jeweller_request_generator = None
+            self.log(f"⚠️ Jeweller Request not available: {e}", 'system')
+
+        # 3. Accept Request Tab
         self.setup_accept_request_tab()
         
-        # 2. Create Jobs Tab (Job Cards Processing)
+        # 4. Create Jobs Tab (Simple Job Creator)
         try:
-            from processors.job_cards_processor import JobCardsProcessor
+            from processors.simple_job_creator import SimpleJobCreator
             from processors.delivery_voucher_processor import DeliveryVoucherProcessor
             from processors.weight_capture_processor import WeightCaptureProcessor
             
-            self.job_cards_processor = JobCardsProcessor(
+            self.simple_job_creator = SimpleJobCreator(
                 None,  # Driver will be set later when browser opens
                 self.log,
                 self.check_license_before_action,
                 self  # Pass app context for settings access
             )
-            self.job_cards_processor.setup_job_cards_tab(self.notebook)
-            self.log("✅ Create Jobs module loaded successfully", 'system')
+            self.simple_job_creator.setup_ui(self.notebook)
+            self.log("✅ Create Jobs loaded successfully", 'system')
             
             # Store processors for later (will be added in order)
             self.delivery_voucher_processor = DeliveryVoucherProcessor(
@@ -967,25 +1154,21 @@ class ManakDesktopApp:
                 self  # Pass app context for settings access
             )
         except ImportError as e:
-            self.job_cards_processor = None
+            self.simple_job_creator = None
             self.delivery_voucher_processor = None
             self.weight_capture_processor = None
-            self.log(f"⚠️ Create Jobs module not available: {e}", 'system')
+            self.log(f"⚠️ Create Jobs not available: {e}", 'system')
             placeholder_frame = ttk.Frame(self.notebook)
             self.notebook.add(placeholder_frame, text="📋 Create Jobs (Unavailable)")
-            ttk.Label(placeholder_frame, text="Create Jobs module not available", 
-                     font=('Segoe UI', 12)).pack(expand=True)
         except Exception as e:
-            self.job_cards_processor = None
+            self.simple_job_creator = None
             self.delivery_voucher_processor = None
             self.weight_capture_processor = None
             self.log(f"❌ Error loading Create Jobs: {e}", 'system')
             placeholder_frame = ttk.Frame(self.notebook)
             self.notebook.add(placeholder_frame, text="📋 Create Jobs (Error)")
-            ttk.Label(placeholder_frame, text=f"Error loading Create Jobs: {str(e)}", 
-                     font=('Segoe UI', 12)).pack(expand=True)
         
-        # 4. Bulk Jobs Tab (Multiple Jobs Processing)
+        # 5. Jobs Tab (Renamed from Bulk Jobs)
         if MultipleJobsProcessor:
             self.multiple_jobs_processor = MultipleJobsProcessor(
                 None,  # Driver will be set later when browser opens
@@ -993,27 +1176,228 @@ class ManakDesktopApp:
                 self.check_license_before_action,
                 self  # Pass main app reference for settings access
             )
+            # We need to monkey-patch the tab title creation if it's hardcoded in the class
+            # or just rely on the order here if it adds itself.
+            # Usually it adds itself via setup_multiple_jobs_tab using self.notebook.add
+            # Inspecting MultipleJobsProcessor would be cleaner but for now assuming it uses the text provided
+            # Wait, we need to make sure the title is "Jobs"
             self.multiple_jobs_processor.setup_multiple_jobs_tab(self.notebook)
+            # Iterate tabs to rename "Bulk Jobs" to "Jobs" if needed, 
+            # but simpler to let it add and then we can rename last tab
+            try:
+                current_tab_count = self.notebook.index('end')
+                self.notebook.tab(current_tab_count-1, text="📂 Jobs")
+            except:
+                pass
+
+        # 6. Weight Capture Tab (Moved here as requested)
+        try:
+            if hasattr(self, 'weight_capture_processor') and self.weight_capture_processor:
+                # Create tab frame first to avoid duplicates on error
+                capture_frame = ttk.Frame(self.notebook)
+                self.notebook.add(capture_frame, text="⚖️ Weight Capture")
+                
+                try:
+                    # Now populate the tab
+                    self.weight_capture_processor.populate_weight_capture_tab(capture_frame)
+                    self.log("✅ Weight Capture module loaded successfully", 'system')
+                except Exception as setup_error:
+                    # Clear the frame and show error
+                    for widget in capture_frame.winfo_children():
+                        widget.destroy()
+                    error_label = ttk.Label(capture_frame, 
+                                          text=f"Error loading Weight Capture:\n{str(setup_error)}\n\nPlease check the logs.",
+                                          font=('Segoe UI', 10),
+                                          foreground='red',
+                                          justify='center')
+                    error_label.pack(expand=True, pady=50)
+                    self.log(f"❌ Error setting up Weight Capture tab: {setup_error}", 'system')
+                    import traceback
+                    self.log(traceback.format_exc(), 'system')
+        except Exception as e:
+            self.log(f"❌ Error loading Weight Capture module: {e}", 'system')
+            import traceback
+            self.log(traceback.format_exc(), 'system')
         
-        # 5. Single Jobs Tab (Weight Entry)
-        self.setup_weight_tab_compact()
+        # 7. Get Jobs Data Tab (Renamed from Scan Jobs Details)
+        try:
+            # Check if class is available
+            if 'DeliveryVoucherScanner' in globals() and DeliveryVoucherScanner is not None:
+                self.delivery_voucher_scanner = DeliveryVoucherScanner(
+                    None,  # Driver will be set later when browser opens
+                    self.log,
+                    self.check_license_before_action,
+                    self  # Pass app context for settings access
+                )
+                self.delivery_voucher_scanner.setup_scanner_tab(self.notebook)
+                
+                # Check if tab was actually added before trying to rename
+                # If scanner failed silently inside setup, tab count won't increase
+                try:
+                    # Rename the last added tab
+                    current_tab_count = self.notebook.index('end')
+                    # Optionally verify it's the right tab? For now assume sequential adding
+                    self.notebook.tab(current_tab_count-1, text="📊 Get Jobs Data")
+                except:
+                    pass
+                self.log("✅ Get Jobs Data module loaded successfully", 'system')
+            else:
+                self.delivery_voucher_scanner = None
+                self.log("⚠️ DeliveryVoucherScanner class not available (Import failed?)", 'system')
+        except Exception as e:
+            self.delivery_voucher_scanner = None
+            self.log(f"⚠️ Get Jobs Data module error: {e}", 'system')
+            # Add placeholder so user knows it failed
+            try:
+                placeholder = ttk.Frame(self.notebook)
+                self.notebook.add(placeholder, text="📊 Get Jobs Data (Error)")
+                ttk.Label(placeholder, text=f"Error loading module: {e}").pack(padx=20, pady=20)
+            except:
+                pass
+
+        # 8. Delivery Voucher Tab
+        try:
+            if hasattr(self, 'delivery_voucher_processor') and self.delivery_voucher_processor:
+                self.delivery_voucher_processor.setup_delivery_voucher_tab(self.notebook)
+                self.log("✅ Delivery Voucher module loaded successfully", 'system')
+        except Exception as e:
+            self.log(f"❌ Error loading Delivery Voucher tab: {e}", 'system')
+            # Add placeholder
+            placeholder = ttk.Frame(self.notebook)
+            self.notebook.add(placeholder, text="📦 Delivery Voucher (Error)")
+            ttk.Label(placeholder, text=f"Error loading module: {e}").pack(padx=20, pady=20)
+
+        # 9. Migrate Jobs Tab (Completed Jobs Scanner - RENAMED)
+        try:
+            if CompletedJobsScanner:
+                self.completed_jobs_scanner = CompletedJobsScanner(
+                    None,  # driver set later
+                    self.log,
+                    self.check_license_before_action,
+                    self
+                )
+                self.completed_jobs_scanner.setup_completed_jobs_tab(self.notebook)
+                self.log("✅ Migrate Jobs module loaded successfully", 'system')
+            else:
+                self.completed_jobs_scanner = None
+                self.log("⚠️ CompletedJobsScanner class not available", 'system')
+        except Exception as e:
+            self.completed_jobs_scanner = None
+            self.log(f"⚠️ Migrate Jobs module error: {e}", 'system')
+            try:
+                placeholder = ttk.Frame(self.notebook)
+                self.notebook.add(placeholder, text="🔄 Migrate Jobs")
+            except:
+                pass
+
+        # 10. Bill Migrate Tab (Bill Import - RENAMED)
+        try:
+            if BillImportProcessor:
+                self.bill_import_processor = BillImportProcessor(
+                    self,  # master Tkinter widget
+                    DB_CONFIG,  # database configuration
+                    self.completed_jobs_scanner,  # reference to scanner for accessing scanned_jobs
+                    self.license_manager  # license manager for firm_id
+                )
+                # Create UI frame for the processor
+                bill_import_frame = ttk.Frame(self.notebook)
+                self.notebook.add(bill_import_frame, text="📄 Bill Migrate")
+                self.bill_import_processor.create_ui(bill_import_frame)
+                self.log("✅ Bill Migrate module loaded successfully", 'system')
+            else:
+                self.bill_import_processor = None
+                self.log("⚠️ BillImportProcessor class not available", 'system')
+        except Exception as e:
+            self.bill_import_processor = None
+            self.log(f"⚠️ Bill Migrate module error: {e}", 'system')
+            try:
+                placeholder = ttk.Frame(self.notebook)
+                self.notebook.add(placeholder, text="📄 Bill Migrate")
+            except:
+                pass
+            
+        # 11. Settings Tab (after Bill Migrate)
+        try:
+            self.setup_settings_tab()
+            self.log("✅ Settings tab loaded successfully", 'system')
+        except Exception as e:
+            self.log(f"❌ Error loading Settings tab: {e}", 'system')
+            placeholder = ttk.Frame(self.notebook)
+            self.notebook.add(placeholder, text="⚙️ Settings (Error)")
+            ttk.Label(placeholder, text=f"Error loading settings: {e}").pack(padx=20, pady=20)
         
-        # 6. Weight Capture Tab - NEW
-        if hasattr(self, 'weight_capture_processor') and self.weight_capture_processor:
-            self.weight_capture_processor.setup_weight_capture_tab(self.notebook)
-            self.log("✅ Weight Capture module loaded successfully", 'system')
-        
-        # 7. Delivery Voucher Tab
-        if hasattr(self, 'delivery_voucher_processor') and self.delivery_voucher_processor:
-            self.delivery_voucher_processor.setup_delivery_voucher_tab(self.notebook)
-            self.log("✅ Delivery Voucher module loaded successfully", 'system')
-        
-        # 8. Settings Tab
-        self.setup_settings_tab()
+        # Keep tabs compact so all menu items fit in one row.
+        self.compact_notebook_tab_labels()
         
         
+        # Hidden Single Jobs tab (kept for compatibility but not in main flow)
+        # self.setup_weight_tab_compact()
+        
+        
+    def compact_notebook_tab_labels(self):
+        """Shorten tab labels to improve visibility on smaller widths"""
+        if not hasattr(self, 'notebook') or not self.notebook:
+            return
+        
+        label_map = {
+            "Login in MANAK": "Login",
+            "Generate Request": "Generate Req",
+            "Accept Request": "Accept Req",
+            "Create Jobs": "Create Jobs",
+            "Weight Capture": "Weight Cap",
+            "Get Jobs Data": "Get Jobs",
+            "Delivery Voucher": "Delivery Vchr",
+            "Completed Jobs": "Completed",
+            "Migrate Jobs": "Migrate",
+            "Bill Migrate": "Bill Migr",
+            "Settings": "Settings",
+            "Single Jobs": "Single Jobs"
+        }
+        
+        for tab_id in self.notebook.tabs():
+            tab_text = (self.notebook.tab(tab_id, "text") or "").strip()
+            normalized_text = tab_text
+            
+            # Remove leading emoji/symbol to save width.
+            if " " in normalized_text:
+                first_token, rest = normalized_text.split(" ", 1)
+                if any(ord(ch) > 127 for ch in first_token):
+                    normalized_text = rest.strip()
+            
+            for full_text, compact_text in label_map.items():
+                if full_text in normalized_text:
+                    normalized_text = compact_text
+                    break
+            
+            self.notebook.tab(tab_id, text=normalized_text)
+    
+    def setup_settings_tab(self):
+        """Setup main Settings tab using legacy full settings UI."""
+        # Prevent duplicate Settings tabs if setup_ui is invoked more than once.
+        for tab_id in self.notebook.tabs():
+            tab_text = (self.notebook.tab(tab_id, "text") or "").strip()
+            if "Settings" in tab_text:
+                self.notebook.select(tab_id)
+                return
+
+        # The legacy implementation includes full device verification,
+        # credentials, and API URL fields expected by current workflows.
+        self._OLD_setup_settings_tab()
+    
+    def _test_url(self, url):
+        """Test if a URL is accessible"""
+        import requests
+        try:
+            response = requests.head(url, timeout=5, verify=True)
+            if response.status_code < 400:
+                messagebox.showinfo("URL Test", f"✅ URL is accessible\nStatus: {response.status_code}")
+            else:
+                messagebox.showwarning("URL Test", f"⚠️ URL returned status {response.status_code}")
+        except Exception as e:
+            messagebox.showerror("URL Test", f"❌ URL is not accessible\n{str(e)}")
+    
     def setup_browser_tab(self):
-        """Setup Login in MANAK tab with enhanced UI"""
+        """Setup Login in MANAK tab with enhanced UI for Dual Browsers"""
         browser_frame = ttk.Frame(self.notebook)
         self.notebook.add(browser_frame, text="🔐 Login in MANAK")
         
@@ -1025,25 +1409,37 @@ class ManakDesktopApp:
         btn_container = ttk.Frame(control_card)
         btn_container.pack(fill='x', padx=10, pady=10)
         
-        # Row 1
-        btn_row1 = ttk.Frame(btn_container)
-        btn_row1.pack(fill='x', pady=(0, 8))
+        # QM Browser Controls
+        qm_frame = ttk.LabelFrame(btn_container, text="👤 QM Browser (Main)", style='Compact.TLabelframe')
+        qm_frame.pack(fill='x', pady=(0, 10))
         
-        self.open_btn = ttk.Button(btn_row1, text="🚀 Open Browser", style='Compact.TButton', command=self.open_browser)
-        self.open_btn.pack(side='left', padx=(0, 8))
+        qm_btns = ttk.Frame(qm_frame)
+        qm_btns.pack(fill='x', padx=5, pady=5)
         
-        self.login_btn = ttk.Button(btn_row1, text="🔑 Navigate to Login", style='Info.TButton', command=self.navigate_to_login, state='disabled')
-        self.login_btn.pack(side='left', padx=(0, 8))
+        self.open_btn = ttk.Button(qm_btns, text="🚀 Open QM Browser", style='Compact.TButton', command=self.open_browser)
+        self.open_btn.pack(side='left', padx=(0, 5))
         
-        # Row 2
-        btn_row2 = ttk.Frame(btn_container)
-        btn_row2.pack(fill='x')
+        self.login_btn = ttk.Button(qm_btns, text="🔑 Login Page", style='Info.TButton', command=self.navigate_to_login, state='disabled')
+        self.login_btn.pack(side='left', padx=(0, 5))
         
-        self.check_btn = ttk.Button(btn_row2, text="🔍 Check Login Status", style='Success.TButton', command=self.check_login, state='disabled')
-        self.check_btn.pack(side='left', padx=(0, 8))
+        self.check_btn = ttk.Button(qm_btns, text="🔍 Check Login", style='Success.TButton', command=self.check_login, state='disabled')
+        self.check_btn.pack(side='left', padx=(0, 5))
         
-        self.close_btn = ttk.Button(btn_row2, text="❌ Close Browser", style='Danger.TButton', command=self.close_browser, state='disabled')
+        self.close_btn = ttk.Button(qm_btns, text="❌ Close QM", style='Danger.TButton', command=self.close_browser, state='disabled')
         self.close_btn.pack(side='left')
+
+        # Reception Browser Controls
+        rec_frame = ttk.LabelFrame(btn_container, text="👤 Reception Browser", style='Compact.TLabelframe')
+        rec_frame.pack(fill='x')
+        
+        rec_btns = ttk.Frame(rec_frame)
+        rec_btns.pack(fill='x', padx=5, pady=5)
+        
+        self.open_reception_btn_main = ttk.Button(rec_btns, text="🚀 Open Reception Browser", style='Compact.TButton', command=self.open_reception_browser)
+        self.open_reception_btn_main.pack(side='left', padx=(0, 5))
+        
+        self.close_reception_btn_main = ttk.Button(rec_btns, text="❌ Close Reception", style='Danger.TButton', command=self.close_reception_browser, state='disabled')
+        self.close_reception_btn_main.pack(side='left')
         
         # Status display card
         status_card = ttk.LabelFrame(browser_frame, text="📋 Status Log", style='Compact.TLabelframe')
@@ -1486,20 +1882,22 @@ class ManakDesktopApp:
             # Step 1: Load weight page
             loading_dialog.update_status("Loading weight page...")
             loading_dialog.update_message("Loading weight entry page for the request...")
-            weight_url = f"https://huid.manakonline.in/MANAK/SamplingweightingDeatils?requestNo={request_no}&jobNo={job_no}"
-            self.driver.get(weight_url)
+            encoded_request = base64.b64encode(str(request_no).encode()).decode()
+            encoded_job = base64.b64encode(str(job_no).encode()).decode()
+            weight_url = f"{portal_config.portal_base()}/MANAK/UID_WeighingForm?requestNo={encoded_request}&jobNo={encoded_job}"
+            self.driver.get(weight_url) # type: ignore
             time.sleep(3)
-            current_url = self.driver.current_url
-            if 'SamplingweightingDeatils' not in current_url:
+            current_url = self.driver.current_url # pyright: ignore[reportOptionalMemberAccess]
+            if 'UID_WeighingForm' not in current_url:
                 raise Exception("Failed to load weight page")
             self.page_loaded = True
             self.log(f"✅ Weight page loaded: {current_url}", 'weight')
             # Step 2: Select Lot No in the portal using Select2 widget
             try:
-                select2_container = self.driver.find_element(By.ID, "s2id_lotno")
+                select2_container = self.driver.find_element(By.ID, "s2id_lotno") # pyright: ignore[reportOptionalMemberAccess]
                 select2_container.click()
                 time.sleep(0.5)
-                options = self.driver.find_elements(By.CSS_SELECTOR, "ul.select2-results li")
+                options = self.driver.find_elements(By.CSS_SELECTOR, "ul.select2-results li") # pyright: ignore[reportOptionalMemberAccess]
                 found = False
                 for option in options:
                     if option.text.strip().endswith(f"Lot {selected_lot}") or option.text.strip() == f"Lot {selected_lot}":
@@ -1510,7 +1908,7 @@ class ManakDesktopApp:
                 if not found:
                     raise Exception(f"Lot {selected_lot} not found in Select2 options")
                 time.sleep(1)
-                lot_dropdown = self.driver.find_element(By.ID, "lotno")
+                lot_dropdown = self.driver.find_element(By.ID, "lotno") # pyright: ignore[reportOptionalMemberAccess]
                 selected_value = lot_dropdown.get_attribute('value')
                 if selected_value != str(selected_lot):
                     self.log(f"⚠️ Lot selection verification failed: expected {selected_lot}, got {selected_value}", 'weight')
@@ -1519,14 +1917,14 @@ class ManakDesktopApp:
             except Exception as select2_error:
                 self.log(f"⚠️ Select2 lot selection failed: {str(select2_error)}. Trying fallback methods...", 'weight')
                 try:
-                    wait = WebDriverWait(self.driver, 10)
+                    wait = WebDriverWait(self.driver, 10) # pyright: ignore[reportArgumentType]
                     lot_dropdown = wait.until(EC.presence_of_element_located((By.ID, "lotno")))
                     if not lot_dropdown.is_displayed() or not lot_dropdown.is_enabled():
-                        self.driver.execute_script("arguments[0].style.display = 'block'; arguments[0].removeAttribute('readonly');", lot_dropdown)
+                        self.driver.execute_script("arguments[0].style.display = 'block'; arguments[0].removeAttribute('readonly');", lot_dropdown) # pyright: ignore[reportOptionalMemberAccess]
                         time.sleep(0.5)
-                    self.driver.execute_script("arguments[0].value = '';", lot_dropdown)
+                    self.driver.execute_script("arguments[0].value = '';", lot_dropdown) # type: ignore
                     time.sleep(0.2)
-                    from selenium.webdriver.support.ui import Select
+                    from selenium.webdriver.support.select import Select
                     select_element = Select(lot_dropdown)
                     select_element.select_by_value(selected_lot)
                     self.log(f"✅ Selected Lot {selected_lot} in portal via Select fallback", 'weight')
@@ -1543,7 +1941,7 @@ class ManakDesktopApp:
                     if not value:
                         skipped_count += 1
                         continue
-                    element = self.driver.find_element(By.ID, field_name)
+                    element = self.driver.find_element(By.ID, field_name) # type: ignore
                     if element.is_displayed() and element.is_enabled():
                         element.clear()
                         element.send_keys(value)
@@ -1551,7 +1949,7 @@ class ManakDesktopApp:
                         self.log(f"✅ Filled {field_name}: {value}", 'weight')
                         # Click savesampleweight button
                         try:
-                            save_btn = self.driver.find_element(By.ID, 'savesampleweight')
+                            save_btn = self.driver.find_element(By.ID, 'savesampleweight')  # type: ignore
                             if save_btn.is_displayed() and save_btn.is_enabled():
                                 save_btn.click()
                                 self.log("💾 Clicked Save Sample Weight button", 'weight')
@@ -1570,7 +1968,7 @@ class ManakDesktopApp:
                     if not value:
                         skipped_count += 1
                         continue
-                    element = self.driver.find_element(By.ID, field_name)
+                    element = self.driver.find_element(By.ID, field_name) # type: ignore
                     if element.is_displayed() and element.is_enabled():
                         element.clear()
                         element.send_keys(value)
@@ -1578,7 +1976,7 @@ class ManakDesktopApp:
                         self.log(f"✅ Filled {field_name}: {value}", 'weight')
                         # Click savebuttonweight button
                         try:
-                            save_btn = self.driver.find_element(By.ID, 'savebuttonweight')
+                            save_btn = self.driver.find_element(By.ID, 'savebuttonweight')  # type: ignore
                             if save_btn.is_displayed() and save_btn.is_enabled():
                                 save_btn.click()
                                 self.log("💾 Clicked Save Button Weight button", 'weight')
@@ -1607,7 +2005,7 @@ class ManakDesktopApp:
                     if not value:
                         skipped_count += 1
                         continue
-                    element = self.driver.find_element(By.ID, field_name)
+                    element = self.driver.find_element(By.ID, field_name)  # type: ignore
                     if element.is_displayed() and element.is_enabled():
                         element.clear()
                         element.send_keys(value)
@@ -1620,7 +2018,7 @@ class ManakDesktopApp:
                     self.log(f"❌ Error filling {field_name}: {str(e)}", 'weight')
             # Click Save (Initial Weight) button for strips
             try:
-                save_btn = self.driver.find_element(By.ID, 'chechkgoldM12')
+                save_btn = self.driver.find_element(By.ID, 'chechkgoldM12')  # type: ignore
                 if save_btn.is_displayed() and save_btn.is_enabled():
                     save_btn.click()
                     self.log("💾 Clicked Save (Initial Weight) button for strips", 'weight')
@@ -1687,20 +2085,22 @@ class ManakDesktopApp:
             # Step 1: Load weight page
             loading_dialog.update_status("Loading weight page...")
             loading_dialog.update_message("Loading weight entry page for the request...")
-            weight_url = f"https://huid.manakonline.in/MANAK/SamplingweightingDeatils?requestNo={request_no}&jobNo={job_no}"
-            self.driver.get(weight_url)
+            encoded_request = base64.b64encode(str(request_no).encode()).decode()
+            encoded_job = base64.b64encode(str(job_no).encode()).decode()
+            weight_url = f"{portal_config.portal_base()}/MANAK/UID_WeighingForm?requestNo={encoded_request}&jobNo={encoded_job}"
+            self.driver.get(weight_url)  # type: ignore
             time.sleep(3)
-            current_url = self.driver.current_url
-            if 'SamplingweightingDeatils' not in current_url:
+            current_url = self.driver.current_url  # type: ignore
+            if 'UID_WeighingForm' not in current_url:
                 raise Exception("Failed to load weight page")
             self.page_loaded = True
             self.log(f"✅ Weight page loaded: {current_url}", 'weight')
             # Step 2: Select Lot No in the portal using Select2 widget
             try:
-                select2_container = self.driver.find_element(By.ID, "s2id_lotno")
+                select2_container = self.driver.find_element(By.ID, "s2id_lotno")  # type: ignore
                 select2_container.click()
                 time.sleep(0.5)
-                options = self.driver.find_elements(By.CSS_SELECTOR, "ul.select2-results li")
+                options = self.driver.find_elements(By.CSS_SELECTOR, "ul.select2-results li")  # type: ignore
                 found = False
                 for option in options:
                     if option.text.strip().endswith(f"Lot {selected_lot}") or option.text.strip() == f"Lot {selected_lot}":
@@ -1711,7 +2111,7 @@ class ManakDesktopApp:
                 if not found:
                     raise Exception(f"Lot {selected_lot} not found in Select2 options")
                 time.sleep(1)
-                lot_dropdown = self.driver.find_element(By.ID, "lotno")
+                lot_dropdown = self.driver.find_element(By.ID, "lotno")  # type: ignore  # type: ignore
                 selected_value = lot_dropdown.get_attribute('value')
                 if selected_value != str(selected_lot):
                     self.log(f"⚠️ Lot selection verification failed: expected {selected_lot}, got {selected_value}", 'weight')
@@ -1720,14 +2120,14 @@ class ManakDesktopApp:
             except Exception as select2_error:
                 self.log(f"⚠️ Select2 lot selection failed: {str(select2_error)}. Trying fallback methods...", 'weight')
                 try:
-                    wait = WebDriverWait(self.driver, 10)
+                    wait = WebDriverWait(self.driver, 10)  # type: ignore
                     lot_dropdown = wait.until(EC.presence_of_element_located((By.ID, "lotno")))
                     if not lot_dropdown.is_displayed() or not lot_dropdown.is_enabled():
-                        self.driver.execute_script("arguments[0].style.display = 'block'; arguments[0].removeAttribute('readonly');", lot_dropdown)
+                        self.driver.execute_script("arguments[0].style.display = 'block'; arguments[0].removeAttribute('readonly');", lot_dropdown)  # type: ignore
                         time.sleep(0.5)
-                    self.driver.execute_script("arguments[0].value = '';", lot_dropdown)
+                    self.driver.execute_script("arguments[0].value = '';", lot_dropdown)  # type: ignore
                     time.sleep(0.2)
-                    from selenium.webdriver.support.ui import Select
+                    from selenium.webdriver.support.select import Select
                     select_element = Select(lot_dropdown)
                     select_element.select_by_value(selected_lot)
                     self.log(f"✅ Selected Lot {selected_lot} in portal via Select fallback", 'weight')
@@ -1744,7 +2144,7 @@ class ManakDesktopApp:
                     if not value:
                         skipped_count += 1
                         continue
-                    element = self.driver.find_element(By.ID, field_name)
+                    element = self.driver.find_element(By.ID, field_name)  # type: ignore  # type: ignore
                     if element.is_displayed() and element.is_enabled():
                         element.clear()
                         element.send_keys(value)
@@ -1764,7 +2164,7 @@ class ManakDesktopApp:
                     if not value:
                         skipped_count += 1
                         continue
-                    element = self.driver.find_element(By.ID, field_id)
+                    element = self.driver.find_element(By.ID, field_id)  # type: ignore
                     if element.is_displayed() and element.is_enabled():
                         element.clear()
                         element.send_keys(value)
@@ -1803,13 +2203,14 @@ class ManakDesktopApp:
             lot_no = self.manual_lot_var.get()
             self.current_lot_no = lot_no
             
-            from selenium.webdriver.support.ui import WebDriverWait, Select
+            from selenium.webdriver.support.wait import WebDriverWait
+            from selenium.webdriver.support.select import Select
             from selenium.webdriver.support import expected_conditions as EC
             import time
             
             # Select the correct lot in the portal
             try:
-                wait = WebDriverWait(self.driver, 10)
+                wait = WebDriverWait(self.driver, 10)  # type: ignore
                 lot_dropdown = wait.until(EC.presence_of_element_located((By.ID, "lotno")))
                 
                 # Try to make it visible if not interactable
@@ -1844,7 +2245,7 @@ class ManakDesktopApp:
                 # Verify selection was successful
                 time.sleep(1)  # Wait for page to update
                 try:
-                    selected_value = lot_dropdown.get_attribute('value')
+                    selected_value = lot_dropdown.get_attribute('value')  # type: ignore
                     if selected_value != lot_no:
                         self.log(f"⚠️ Lot selection verification failed: expected {lot_no}, got {selected_value}", 'weight')
                     else:
@@ -1867,7 +2268,7 @@ class ManakDesktopApp:
             
         loading_dialog = None
         try:
-            from selenium.webdriver.support.ui import WebDriverWait
+            from selenium.webdriver.support.wait import WebDriverWait
             from selenium.webdriver.support import expected_conditions as EC
             import time
             # Get the correct lot number using helper method
@@ -1877,11 +2278,13 @@ class ManakDesktopApp:
             loading_dialog = LoadingDialog(self.root, "Save Cornet Weights", "Filling cornet weights and saving...")
             loading_dialog.update_status("Loading weight page...")
             loading_dialog.update_message("Loading weight entry page for the request...")
-            weight_url = f"https://huid.manakonline.in/MANAK/SamplingweightingDeatils?requestNo={request_no}&jobNo={job_no}"
-            self.driver.get(weight_url)
+            encoded_request = base64.b64encode(str(request_no).encode()).decode()
+            encoded_job = base64.b64encode(str(job_no).encode()).decode()
+            weight_url = f"{portal_config.portal_base()}/MANAK/UID_WeighingForm?requestNo={encoded_request}&jobNo={encoded_job}"
+            self.driver.get(weight_url)  # type: ignore
             time.sleep(3)
-            current_url = self.driver.current_url
-            if 'SamplingweightingDeatils' not in current_url:
+            current_url = self.driver.current_url # type: ignore
+            if 'UID_WeighingForm' not in current_url:
                 raise Exception("Failed to load weight page")
             self.page_loaded = True
             self.log(f"✅ Weight page loaded: {current_url}", 'weight')
@@ -1901,7 +2304,7 @@ class ManakDesktopApp:
                     if field_id in self.weight_entries:
                         value = self.weight_entries[field_id].get().strip()
                         if value:
-                            element = self.driver.find_element(By.ID, field_id)
+                            element = self.driver.find_element(By.ID, field_id)  # type: ignore
                             if element.is_displayed() and element.is_enabled():
                                 element.clear()
                                 element.send_keys(value)
@@ -1913,14 +2316,14 @@ class ManakDesktopApp:
             loading_dialog.update_status("Saving cornet weights...")
             # Click savecornetvalues button
             try:
-                save_btn = self.driver.find_element(By.ID, 'savecornetvalues')
+                save_btn = self.driver.find_element(By.ID, 'savecornetvalues')  # type: ignore
                 if save_btn.is_displayed() and save_btn.is_enabled():
                     save_btn.click()
                     self.log("💾 Clicked Save Cornet Weight button", 'weight')
                     time.sleep(1)
                     # Handle first alert (Are you sure you want to save?)
                     try:
-                        alert = self.driver.switch_to.alert
+                        alert = self.driver.switch_to.alert  # type: ignore
                         alert_text = alert.text
                         self.log(f"🔔 Alert: {alert_text}", 'weight')
                         alert.accept()
@@ -1929,7 +2332,7 @@ class ManakDesktopApp:
                         self.log(f"❌ Error handling first alert: {str(e)}", 'weight')
                     # Handle second alert (result)
                     try:
-                        alert = self.driver.switch_to.alert
+                        alert = self.driver.switch_to.alert  # type: ignore
                         alert_text = alert.text
                         self.log(f"🔔 Result Alert: {alert_text}", 'weight')
                         alert.accept()
@@ -1947,7 +2350,7 @@ class ManakDesktopApp:
             # If checkbox is checked, submit for HUID
             if getattr(self, 'include_submit_huid_var', None) and self.include_submit_huid_var.get():
                 try:
-                    submit_btn = self.driver.find_element(By.ID, 'submitQM')
+                    submit_btn = self.driver.find_element(By.ID, 'submitQM')  # type: ignore
                     if submit_btn.is_displayed() and submit_btn.is_enabled():
                         submit_btn.click()
                         self.log("📤 Submitted for HUID (auto)", 'weight')
@@ -2008,8 +2411,8 @@ class ManakDesktopApp:
         except Exception as e:
             self.log(f"❌ Error submitting form: {str(e)}", 'weight')
     
-    def setup_settings_tab(self):
-        """Setup settings tab with scrollable content"""
+    def _OLD_setup_settings_tab(self):
+        """DEPRECATED: Old settings tab - replaced with new implementation at line 1407"""
         # Main container frame
         settings_container = ttk.Frame(self.notebook)
         self.notebook.add(settings_container, text="⚙️ Settings")
@@ -2027,7 +2430,16 @@ class ManakDesktopApp:
             lambda e: canvas.configure(scrollregion=canvas.bbox("all"))
         )
         
-        canvas.create_window((0, 0), window=settings_frame, anchor="nw")
+        # Create window inside canvas
+        window_id = canvas.create_window((0, 0), window=settings_frame, anchor="nw")
+        
+        # Proper resizing to fill width
+        def on_canvas_configure(event):
+            canvas.configure(scrollregion=canvas.bbox("all"))
+            canvas.itemconfig(window_id, width=event.width)
+            
+        canvas.bind("<Configure>", on_canvas_configure)
+        
         canvas.configure(yscrollcommand=scrollbar.set)
         
         # Pack canvas and scrollbar
@@ -2037,205 +2449,294 @@ class ManakDesktopApp:
         # Enable mouse wheel scrolling
         def _on_mousewheel(event):
             canvas.yview_scroll(int(-1*(event.delta/120)), "units")
+            
         canvas.bind_all("<MouseWheel>", _on_mousewheel)
         
-        # Device Information Card - Compact layout
+        # === Row 1: Device Info & License Verification ===
+        row1 = ttk.Frame(settings_frame)
+        row1.pack(fill='x', padx=20, pady=10)
+        
+        # --- Device Information Card (Left) ---
         if self.license_manager:
-            device_card = ttk.LabelFrame(settings_frame, text="📱 Device Info", style='Compact.TLabelframe')
-            device_card.pack(fill='x', padx=10, pady=(5, 3))
+            device_card = ttk.LabelFrame(row1, text="📱 Device Info", style='Compact.TLabelframe')
+            device_card.pack(side='left', fill='both', expand=True, padx=(0, 10))
             
-            device_frame = ttk.Frame(device_card)
-            device_frame.pack(fill='x', padx=8, pady=5)
+            # Grid layout for device info
+            device_grid = ttk.Frame(device_card)
+            device_grid.pack(fill='x', padx=15, pady=10)
+            device_grid.columnconfigure(1, weight=1)
             
-            # MAC Address (read-only)
-            ttk.Label(device_frame, text="MAC:", font=('Segoe UI', 8, 'bold')).grid(row=0, column=0, padx=(0, 5), pady=2, sticky='w')
-            mac_address = self.license_manager.mac_address if self.license_manager else "Unknown"
-            mac_label = tk.Label(device_frame, text=mac_address, font=('Segoe UI', 9), 
-                               bg='#f8f9fa', fg='#495057', relief='sunken', padx=5, pady=2)
-            mac_label.grid(row=0, column=1, padx=(0, 5), pady=2, sticky='w')
+            # MAC Address
+            ttk.Label(device_grid, text="MAC Address:", font=('Segoe UI', 9, 'bold')).grid(row=0, column=0, sticky='w', pady=5)
+            mac_address = (self.license_manager.mac_address if self.license_manager else None) or "Unknown"
+            mac_label = tk.Label(device_grid, text=mac_address, font=('Segoe UI', 9), 
+                               bg='#f8f9fa', fg='#495057', relief='sunken', padx=8, pady=4, anchor='w')
+            mac_label.grid(row=0, column=1, sticky='ew', padx=(10, 0))
             
-            # Device ID (read-only)
-            ttk.Label(device_frame, text="ID:", font=('Segoe UI', 8, 'bold')).grid(row=1, column=0, padx=(0, 5), pady=2, sticky='w')
-            device_id = self.license_manager.device_id if self.license_manager else "Unknown"
-            device_id_label = tk.Label(device_frame, text=device_id, font=('Segoe UI', 9), 
-                                     bg='#f8f9fa', fg='#495057', relief='sunken', padx=5, pady=2)
-            device_id_label.grid(row=1, column=1, padx=(0, 5), pady=2, sticky='w')
+            # Device ID
+            ttk.Label(device_grid, text="Device ID:", font=('Segoe UI', 9, 'bold')).grid(row=1, column=0, sticky='w', pady=5)
+            device_id = (self.license_manager.device_id if self.license_manager else None) or "Unknown"
+            device_id_label = tk.Label(device_grid, text=device_id, font=('Segoe UI', 9), 
+                                     bg='#f8f9fa', fg='#495057', relief='sunken', padx=8, pady=4, anchor='w')
+            device_id_label.grid(row=1, column=1, sticky='ew', padx=(10, 0))
             
-            # License status with details
-            ttk.Label(device_frame, text="Status:", font=('Segoe UI', 8, 'bold')).grid(row=2, column=0, padx=(0, 5), pady=2, sticky='w')
-            status_frame = ttk.Frame(device_frame)
-            status_frame.grid(row=2, column=1, sticky='w', padx=(0, 5), pady=2)
+            # Status
+            ttk.Label(device_grid, text="License Status:", font=('Segoe UI', 9, 'bold')).grid(row=2, column=0, sticky='w', pady=5)
+            status_frame = ttk.Frame(device_grid)
+            status_frame.grid(row=2, column=1, sticky='w', padx=(10, 0))
             
             self.license_status_label = ttk.Label(status_frame, text="⏳ Not Verified", font=('Segoe UI', 9, 'bold'), foreground='#ffc107')
-            self.license_status_label.pack(side='left', padx=(0, 5))
+            self.license_status_label.pack(side='left')
             
-            # Add expiry date/trial info
-            self.license_info_label = ttk.Label(status_frame, text="", font=('Segoe UI', 8))
-            self.license_info_label.pack(side='left')
-            
-        # License Verification Card
+            self.license_info_label = ttk.Label(status_frame, text="", font=('Segoe UI', 9))
+            self.license_info_label.pack(side='left', padx=(10, 0))
+
+        # --- License Verification Card (Right) ---
         if self.license_manager:
-            portal_card = ttk.LabelFrame(settings_frame, text="🔐 License Verification", style='Compact.TLabelframe')
-            portal_card.pack(fill='x', padx=10, pady=3)
+            portal_card = ttk.LabelFrame(row1, text="🔐 License Verification", style='Compact.TLabelframe')
+            portal_card.pack(side='left', fill='both', expand=True, padx=(10, 0))
             
-            portal_frame = ttk.Frame(portal_card)
-            portal_frame.pack(fill='x', padx=8, pady=5)
+            portal_grid = ttk.Frame(portal_card)
+            portal_grid.pack(fill='x', padx=15, pady=10)
+            portal_grid.columnconfigure(1, weight=1)
             
-            # Portal Username
-            ttk.Label(portal_frame, text="Username:", font=('Segoe UI', 8, 'bold')).grid(row=0, column=0, padx=(0, 5), pady=2, sticky='w')
+            # Username
+            ttk.Label(portal_grid, text="Portal Username:", font=('Segoe UI', 9, 'bold')).grid(row=0, column=0, sticky='w', pady=5)
             self.portal_username_var = tk.StringVar()
-            portal_username_entry = ttk.Entry(portal_frame, textvariable=self.portal_username_var, width=25, style='Compact.TEntry', font=('Segoe UI', 9))
-            portal_username_entry.grid(row=0, column=1, padx=(0, 5), pady=2, sticky='w')
+            portal_username_entry = ttk.Entry(portal_grid, textvariable=self.portal_username_var, style='Compact.TEntry', font=('Segoe UI', 10))
+            portal_username_entry.grid(row=0, column=1, sticky='ew', padx=(10, 0))
             
-            # Portal Password
-            ttk.Label(portal_frame, text="Password:", font=('Segoe UI', 8, 'bold')).grid(row=1, column=0, padx=(0, 5), pady=2, sticky='w')
+            # Password
+            ttk.Label(portal_grid, text="Portal Password:", font=('Segoe UI', 9, 'bold')).grid(row=1, column=0, sticky='w', pady=5)
             self.portal_password_var = tk.StringVar()
-            portal_password_entry = ttk.Entry(portal_frame, textvariable=self.portal_password_var, width=25, style='Compact.TEntry', show='*', font=('Segoe UI', 9))
-            portal_password_entry.grid(row=1, column=1, padx=(0, 5), pady=2, sticky='w')
+            portal_password_entry = ttk.Entry(portal_grid, textvariable=self.portal_password_var, style='Compact.TEntry', show='*', font=('Segoe UI', 10))
+            portal_password_entry.grid(row=1, column=1, sticky='ew', padx=(10, 0))
             
-            # Action buttons
-            btn_frame = ttk.Frame(portal_frame)
-            btn_frame.grid(row=2, column=0, columnspan=2, pady=8)
+            # Buttons
+            btn_frame = ttk.Frame(portal_grid)
+            btn_frame.grid(row=2, column=0, columnspan=2, pady=(15, 0), sticky='w')
             
             verify_btn = ttk.Button(btn_frame, text="🔍 Verify License", style='Info.TButton', command=self.verify_license)
-            verify_btn.pack(side='left', padx=(0, 5))
+            verify_btn.pack(side='left', padx=(0, 10))
             
             clear_btn = ttk.Button(btn_frame, text="🗑️ Clear License", style='Danger.TButton', command=self.clear_license)
             clear_btn.pack(side='left')
+
+        # === Row 2: BIS Portal Configuration & Reception Login ===
+        row2 = ttk.Frame(settings_frame)
+        row2.pack(fill='x', padx=20, pady=10)
+
+        # --- BIS Portal Configuration Card (Left) ---
+        bis_card = ttk.LabelFrame(row2, text="🏢 BIS Portal Configuration", style='Compact.TLabelframe')
+        bis_card.pack(side='left', fill='both', expand=True, padx=(0, 10))
         
-        # BIS Portal Configuration Card
-        settings_card = ttk.LabelFrame(settings_frame, text="🌐 BIS Portal Configuration", style='Compact.TLabelframe')
-        settings_card.pack(fill='x', padx=10, pady=3)
-        
-        settings_grid = ttk.Frame(settings_card)
-        settings_grid.pack(fill='x', padx=8, pady=5)
+        bis_grid = ttk.Frame(bis_card)
+        bis_grid.pack(fill='x', padx=15, pady=10)
+        bis_grid.columnconfigure(1, weight=1)
         
         # Username
-        ttk.Label(settings_grid, text="Username:", font=('Segoe UI', 8, 'bold')).grid(row=0, column=0, padx=(0, 5), pady=3, sticky='w')
+        ttk.Label(bis_grid, text="BIS Username:", font=('Segoe UI', 9, 'bold')).grid(row=0, column=0, sticky='w', pady=5)
         self.username_var = tk.StringVar(value='qmhmc1')
-        username_entry = ttk.Entry(settings_grid, textvariable=self.username_var, width=20, style='Compact.TEntry', font=('Segoe UI', 9))
-        username_entry.grid(row=0, column=1, padx=(0, 5), pady=3, sticky='w')
+        bis_username_entry = ttk.Entry(bis_grid, textvariable=self.username_var, style='Compact.TEntry', font=('Segoe UI', 10))
+        bis_username_entry.grid(row=0, column=1, sticky='ew', padx=(10, 0))
         
         # Password
-        ttk.Label(settings_grid, text="Password:", font=('Segoe UI', 8, 'bold')).grid(row=1, column=0, padx=(0, 5), pady=3, sticky='w')
+        ttk.Label(bis_grid, text="BIS Password:", font=('Segoe UI', 9, 'bold')).grid(row=1, column=0, sticky='w', pady=5)
         self.password_var = tk.StringVar(value='Mahalaxmi14')
-        password_entry = ttk.Entry(settings_grid, textvariable=self.password_var, width=20, style='Compact.TEntry', show='*', font=('Segoe UI', 9))
-        password_entry.grid(row=1, column=1, padx=(0, 5), pady=3, sticky='w')
+        bis_password_entry = ttk.Entry(bis_grid, textvariable=self.password_var, style='Compact.TEntry', show='*', font=('Segoe UI', 10))
+        bis_password_entry.grid(row=1, column=1, sticky='ew', padx=(10, 0))
         
         # Firm ID
-        ttk.Label(settings_grid, text="Firm ID:", font=('Segoe UI', 8, 'bold')).grid(row=2, column=0, padx=(0, 5), pady=3, sticky='w')
+        ttk.Label(bis_grid, text="Firm ID:", font=('Segoe UI', 9, 'bold')).grid(row=2, column=0, sticky='w', pady=5)
         self.firm_id_var = tk.StringVar(value='2')
-        self.firm_id_display_label = tk.Label(settings_grid, text='2', font=('Segoe UI', 9, 'bold'), 
-                                             fg='#17a2b8', bg='#f8f9fa', relief='sunken', padx=5, pady=2)
-        self.firm_id_display_label.grid(row=2, column=1, padx=(0, 5), pady=3, sticky='w')
+        self.firm_id_display_label = tk.Label(bis_grid, text='2', font=('Segoe UI', 9, 'bold'), 
+                                             fg='#17a2b8', bg='#f8f9fa', relief='sunken', padx=10, pady=4, anchor='w')
+        self.firm_id_display_label.grid(row=2, column=1, sticky='ew', padx=(10, 0))
+
+        # --- Reception Login Card (Right) ---
+        recep_card = ttk.LabelFrame(row2, text="👤 Reception Login", style='Compact.TLabelframe')
+        recep_card.pack(side='left', fill='both', expand=True, padx=(10, 0))
         
-        # Advanced Settings Card
-        api_card = ttk.LabelFrame(settings_frame, text="⚙️ Advanced Settings", style='Compact.TLabelframe')
-        api_card.pack(fill='x', padx=10, pady=3)
+        recep_grid = ttk.Frame(recep_card)
+        recep_grid.pack(fill='x', padx=15, pady=10)
+        recep_grid.columnconfigure(1, weight=1)
         
-        api_main_frame = ttk.Frame(api_card)
-        api_main_frame.pack(fill='x', padx=8, pady=5)
+        # Username
+        ttk.Label(recep_grid, text="Reception Username:", font=('Segoe UI', 9, 'bold')).grid(row=0, column=0, sticky='w', pady=5)
+        self.reception_username_var = tk.StringVar(value='mahalaxmird')
+        recep_username_entry = ttk.Entry(recep_grid, textvariable=self.reception_username_var, style='Compact.TEntry', font=('Segoe UI', 10))
+        recep_username_entry.grid(row=0, column=1, sticky='ew', padx=(10, 0))
         
-        # Password reveal controls (no hint text for security)
-        reveal_frame = ttk.Frame(api_main_frame)
-        reveal_frame.pack(fill='x', pady=3)
+        # Password
+        ttk.Label(recep_grid, text="Reception Password:", font=('Segoe UI', 9, 'bold')).grid(row=1, column=0, sticky='w', pady=5)
+        self.reception_password_var = tk.StringVar()
+        recep_password_entry = ttk.Entry(recep_grid, textvariable=self.reception_password_var, style='Compact.TEntry', show='*', font=('Segoe UI', 10))
+        recep_password_entry.grid(row=1, column=1, sticky='ew', padx=(10, 0))
+
+        # === Row 3: API Configuration (Full Width) ===
+        api_card = ttk.LabelFrame(settings_frame, text="🌐 API Configuration", style='Compact.TLabelframe')
+        api_card.pack(fill='x', padx=20, pady=10)
         
-        ttk.Label(reveal_frame, text="Password:", font=('Segoe UI', 8)).pack(side='left', padx=(0, 5))
+        # Container for swappable content to handle locking
+        self.api_container = ttk.Frame(api_card)
+        self.api_container.pack(fill='x', padx=15, pady=10)
         
-        self.api_password_var = tk.StringVar()
-        self.api_password_entry = ttk.Entry(reveal_frame, textvariable=self.api_password_var, 
-                                          show='*', width=20, style='Compact.TEntry', font=('Segoe UI', 9))
-        self.api_password_entry.pack(side='left', padx=(0, 8))
+        # --- Locked View ---
+        self.api_locked_frame = ttk.Frame(self.api_container)
         
-        self.reveal_btn = ttk.Button(reveal_frame, text="⚙️ Show Settings", 
-                                    style='Warning.TButton', command=self.toggle_api_visibility)
-        self.reveal_btn.pack(side='left')
+        lock_msg = ttk.Frame(self.api_locked_frame)
+        lock_msg.pack(pady=10)
+        ttk.Label(lock_msg, text="🔒 Restricted Area", font=('Segoe UI', 10, 'bold'), foreground='#6c757d').pack(side='left', padx=5)
+        ttk.Label(lock_msg, text="- Enter password to configure API endpoints", font=('Segoe UI', 9), foreground='#6c757d').pack(side='left')
         
-        # Hidden API fields frame
-        self.api_fields_frame = ttk.Frame(api_main_frame)
-        self.api_fields_frame.pack(fill='x', pady=(8, 0))
+        lock_grid = ttk.Frame(self.api_locked_frame)
+        lock_grid.pack(pady=(0, 10))
         
-        # Configure grid to allow proper sizing
-        self.api_fields_frame.columnconfigure(1, weight=1)
+        ttk.Label(lock_grid, text="Password:").pack(side='left', padx=5)
+        self.api_unlock_pass_var = tk.StringVar()
+        pass_entry = ttk.Entry(lock_grid, textvariable=self.api_unlock_pass_var, show="●", width=25, style='Compact.TEntry')
+        pass_entry.pack(side='left', padx=5)
         
-        # Job Data API URL
-        ttk.Label(self.api_fields_frame, text="Job Data API:", font=('Segoe UI', 8, 'bold')).grid(row=0, column=0, padx=(0, 5), pady=3, sticky='w')
-        self.api_url_var = tk.StringVar(value='https://hallmarkpro.prosenjittechhub.com/admin/get_job_report.php?job_no=')
-        self.api_url_entry = ttk.Entry(self.api_fields_frame, textvariable=self.api_url_var, width=55, style='Compact.TEntry', font=('Segoe UI', 8))
-        self.api_url_entry.grid(row=0, column=1, padx=(0, 5), pady=3, sticky='ew')
-        
-        # Request No API URL
-        ttk.Label(self.api_fields_frame, text="Request No API:", font=('Segoe UI', 8, 'bold')).grid(row=1, column=0, padx=(0, 5), pady=3, sticky='w')
-        self.request_api_url_var = tk.StringVar(value='https://hallmarkpro.prosenjittechhub.com/admin/API/get_request_no.php?job_no=')
-        self.request_api_entry = ttk.Entry(self.api_fields_frame, textvariable=self.request_api_url_var, width=55, style='Compact.TEntry', font=('Segoe UI', 8))
-        self.request_api_entry.grid(row=1, column=1, padx=(0, 5), pady=3, sticky='ew')
-        
-        # Orders API URL
-        ttk.Label(self.api_fields_frame, text="Orders API:", font=('Segoe UI', 8, 'bold')).grid(row=2, column=0, padx=(0, 5), pady=3, sticky='w')
-        self.orders_api_url_var = tk.StringVar(value='http://localhost/manak_auto_fill/get_orders.php')
-        self.orders_api_entry = ttk.Entry(self.api_fields_frame, textvariable=self.orders_api_url_var, width=55, style='Compact.TEntry', font=('Segoe UI', 8))
-        self.orders_api_entry.grid(row=2, column=1, padx=(0, 5), pady=3, sticky='ew')
-        
-        # Report API URL
-        ttk.Label(self.api_fields_frame, text="Report API:", font=('Segoe UI', 8, 'bold')).grid(row=3, column=0, padx=(0, 5), pady=3, sticky='w')
-        self.report_api_url_var = tk.StringVar(value='https://hallmarkpro.prosenjittechhub.com/admin/get_report_by_id.php')
-        self.report_api_entry = ttk.Entry(self.api_fields_frame, textvariable=self.report_api_url_var, width=55, style='Compact.TEntry', font=('Segoe UI', 8))
-        self.report_api_entry.grid(row=3, column=1, padx=(0, 5), pady=3, sticky='ew')
-        
-        # API Key
-        ttk.Label(self.api_fields_frame, text="API Key:", font=('Segoe UI', 8, 'bold')).grid(row=4, column=0, padx=(0, 5), pady=3, sticky='w')
-        self.api_key_var = tk.StringVar(value='')
-        self.api_key_entry = ttk.Entry(self.api_fields_frame, textvariable=self.api_key_var, width=55, style='Compact.TEntry', show='*', font=('Segoe UI', 8))
-        self.api_key_entry.grid(row=4, column=1, padx=(0, 5), pady=3, sticky='ew')
-        
-        # Initially hide API fields
-        self.api_fields_frame.pack_forget()
-        
-        # Bind keyboard shortcut Ctrl+Shift+P
-        self.root.bind('<Control-Shift-Key-P>', lambda e: self.toggle_api_visibility())
-        
-        # Save Settings Button - Always visible at bottom
-        save_frame = ttk.Frame(settings_frame)
-        save_frame.pack(fill='x', padx=10, pady=10)
-        
-        save_btn = ttk.Button(save_frame, text="💾 Save Settings", style='Success.TButton', command=self.save_settings, width=20)
-        save_btn.pack()
-        
-    def toggle_api_visibility(self):
-        """Toggle API settings visibility based on password or shortcut"""
-        try:
-            # Check if password is entered or shortcut was used
-            password = self.api_password_var.get().strip()
-            
-            # Default password for API access (you can change this)
-            default_password = "manak2024"
-            
-            # Check if API fields are currently visible
-            is_visible = hasattr(self, '_api_visible') and self._api_visible
-            
-            if is_visible:
-                # If visible, hide without password
-                self.api_fields_frame.pack_forget()
-                self.reveal_btn.configure(text="⚙️ Show Settings")
-                self._api_visible = False
-                self.api_password_var.set("")
-                self.log("🔒 Settings hidden", 'status')
+        def unlock_api(event=None):
+            if self.api_unlock_pass_var.get() == "Manak2024":
+                self.api_locked_frame.pack_forget()
+                self.api_unlocked_frame.pack(fill='x')
+                self.api_unlock_pass_var.set("") # Clear password
             else:
-                # If hidden, require password to reveal
-                if password == default_password:
-                    # Show API fields
-                    self.api_fields_frame.pack(fill='x', pady=(8, 0))
-                    self.reveal_btn.configure(text="🔒 Hide Settings")
-                    self._api_visible = True
-                    self.api_password_var.set("")
-                    self.log("🔓 Settings revealed", 'status')
-                else:
-                    messagebox.showwarning("Access Denied", "Incorrect password")
-                    self.api_password_var.set("")
-                
-        except Exception as e:
-            self.log(f"❌ Error toggling API visibility: {str(e)}", 'status')
+                messagebox.showerror("Access Denied", "Incorrect Password for API Configuration")
+
+        pass_entry.bind('<Return>', unlock_api)
+        ttk.Button(lock_grid, text="🔓 Unlock Settings", command=unlock_api, style='Info.TButton').pack(side='left', padx=5)
         
+        self.api_locked_frame.pack(fill='x') # Show locked view by default
+        
+        # --- Unlocked View (Hidden initially) ---
+        self.api_unlocked_frame = ttk.Frame(self.api_container)
+        self.api_unlocked_frame.columnconfigure(1, weight=1)
+        
+        # Base API URL
+        ttk.Label(self.api_unlocked_frame, text="Server API URL:", font=('Segoe UI', 9, 'bold')).grid(row=0, column=0, sticky='w', pady=5)
+        self.api_base_url_var = tk.StringVar(value="https://hallmarkpro.in/admin/")
+        
+        base_url_container = ttk.Frame(self.api_unlocked_frame)
+        base_url_container.grid(row=0, column=1, sticky='ew', padx=(10, 0))
+        base_url_container.columnconfigure(0, weight=1)
+        
+        api_url_entry = ttk.Entry(base_url_container, textvariable=self.api_base_url_var, style='Compact.TEntry', font=('Segoe UI', 10))
+        api_url_entry.grid(row=0, column=0, sticky='ew')
+        
+        # Re-lock button
+        def relock_api():
+            self.api_unlocked_frame.pack_forget()
+            self.api_locked_frame.pack(fill='x')
+            
+        ttk.Button(base_url_container, text="🔒 Lock", command=relock_api, style='Small.TButton', width=6).grid(row=0, column=1, padx=(5, 0))
+
+        ttk.Label(self.api_unlocked_frame, text="Base URL for requests (e.g. https://domain.com/admin/)", font=('Segoe UI', 8, 'italic'), foreground='#6c757d').grid(row=1, column=1, sticky='w', padx=(10, 0))
+
+        # Individual Fields Section
+        ttk.Label(self.api_unlocked_frame, text="API Endpoints Setup", font=('Segoe UI', 9, 'bold', 'underline'), foreground='#007bff').grid(row=2, column=0, columnspan=4, sticky='w', pady=(20, 10))
+        
+        # Configure columns for grid layout (2 columns of fields)
+        self.api_unlocked_frame.columnconfigure(1, weight=1)
+        self.api_unlocked_frame.columnconfigure(3, weight=1)
+        
+        # Row 3: Jeweller API & Check Jobs API
+        ttk.Label(self.api_unlocked_frame, text="Jeweller API:", font=('Segoe UI', 9)).grid(row=3, column=0, sticky='w', pady=5, padx=(0, 5))
+        self.jeweller_api_url_var = tk.StringVar(value=config.JEWELLER_API_URL)
+        ttk.Entry(self.api_unlocked_frame, textvariable=self.jeweller_api_url_var, style='Compact.TEntry').grid(row=3, column=1, sticky='ew', padx=(0, 20))
+        
+        ttk.Label(self.api_unlocked_frame, text="Check Jobs API:", font=('Segoe UI', 9)).grid(row=3, column=2, sticky='w', pady=5, padx=(0, 5))
+        self.check_jobs_api_url_var = tk.StringVar(value=config.CHECK_JOBS_API_URL)
+        ttk.Entry(self.api_unlocked_frame, textvariable=self.check_jobs_api_url_var, style='Compact.TEntry').grid(row=3, column=3, sticky='ew')
+        
+        # Row 4: Manage Jeweller API & Save Job API
+        ttk.Label(self.api_unlocked_frame, text="Manage Jeweller:", font=('Segoe UI', 9)).grid(row=4, column=0, sticky='w', pady=5, padx=(0, 5))
+        self.manage_jeweller_api_url_var = tk.StringVar(value=config.MANAGE_JEWELLER_API_URL)
+        ttk.Entry(self.api_unlocked_frame, textvariable=self.manage_jeweller_api_url_var, style='Compact.TEntry').grid(row=4, column=1, sticky='ew', padx=(0, 20))
+        
+        ttk.Label(self.api_unlocked_frame, text="Save Job API:", font=('Segoe UI', 9)).grid(row=4, column=2, sticky='w', pady=5, padx=(0, 5))
+        self.save_job_api_url_var = tk.StringVar(value=config.SAVE_JOB_API_URL)
+        ttk.Entry(self.api_unlocked_frame, textvariable=self.save_job_api_url_var, style='Compact.TEntry').grid(row=4, column=3, sticky='ew')
+        
+        # Row 5: Report API & Get Jobs API
+        ttk.Label(self.api_unlocked_frame, text="Report API:", font=('Segoe UI', 9)).grid(row=5, column=0, sticky='w', pady=5, padx=(0, 5))
+        self.report_api_url_var = tk.StringVar(value=getattr(config, 'REPORT_API_URL', ''))
+        ttk.Entry(self.api_unlocked_frame, textvariable=self.report_api_url_var, style='Compact.TEntry').grid(row=5, column=1, sticky='ew', padx=(0, 20))
+        
+        ttk.Label(self.api_unlocked_frame, text="Get Jobs API:", font=('Segoe UI', 9)).grid(row=5, column=2, sticky='w', pady=5, padx=(0, 5))
+        self.get_jobs_api_url_var = tk.StringVar(value=getattr(config, 'GET_JOBS_API_URL', ''))
+        ttk.Entry(self.api_unlocked_frame, textvariable=self.get_jobs_api_url_var, style='Compact.TEntry').grid(row=5, column=3, sticky='ew')
+        
+        # Row 6: Request API
+        ttk.Label(self.api_unlocked_frame, text="Request API:", font=('Segoe UI', 9)).grid(row=6, column=0, sticky='w', pady=5, padx=(0, 5))
+        self.request_api_url_var = tk.StringVar(value=getattr(config, 'REQUEST_API_URL', ''))
+        ttk.Entry(self.api_unlocked_frame, textvariable=self.request_api_url_var, style='Compact.TEntry').grid(row=6, column=1, sticky='ew', padx=(0, 20))
+        
+        # Row 7: Portal Generate Request URL (New)
+        ttk.Label(self.api_unlocked_frame, text="Portal Gen URL:", font=('Segoe UI', 9)).grid(row=7, column=0, sticky='w', pady=5, padx=(0, 5))
+        self.portal_generate_url_var = tk.StringVar(value=portal_config.get_default_portal_generate_url())
+        ttk.Entry(self.api_unlocked_frame, textvariable=self.portal_generate_url_var, style='Compact.TEntry').grid(row=7, column=1, columnspan=3, sticky='ew')
+        ttk.Label(self.api_unlocked_frame, text="(Enter the specific 'Generate Request' page URL for your firm)", font=('Segoe UI', 8, 'italic'), foreground='#6c757d').grid(row=8, column=1, columnspan=3, sticky='w')
+        
+
+        
+
+        
+        # === MANAK Portal: Live vs Demo ===
+        portal_env_card = ttk.LabelFrame(settings_frame, text="MANAK Portal Environment", style='Compact.TLabelframe')
+        portal_env_card.pack(fill='x', padx=20, pady=10)
+
+        portal_env_inner = ttk.Frame(portal_env_card)
+        portal_env_inner.pack(fill='x', padx=15, pady=10)
+
+        self.portal_env_var = tk.StringVar(value=portal_config.get_portal_env())
+        ttk.Radiobutton(
+            portal_env_inner,
+            text="Live — huid.manakonline.in (production)",
+            variable=self.portal_env_var,
+            value=portal_config.PORTAL_ENV_LIVE,
+            command=self._on_portal_env_change,
+        ).pack(anchor='w', pady=2)
+        ttk.Radiobutton(
+            portal_env_inner,
+            text="Demo — newmanak.uat.dcservices.in (testing)",
+            variable=self.portal_env_var,
+            value=portal_config.PORTAL_ENV_DEMO,
+            command=self._on_portal_env_change,
+        ).pack(anchor='w', pady=2)
+
+        self.portal_env_status_label = ttk.Label(
+            portal_env_inner,
+            text="",
+            font=('Segoe UI', 8),
+            foreground='#6c757d',
+        )
+        self.portal_env_status_label.pack(anchor='w', pady=(6, 0))
+        self._update_portal_env_status_label()
+
+        # === Login URL (portal browser) ===
+        login_url_card = ttk.LabelFrame(settings_frame, text="Portal Login URL", style='Compact.TLabelframe')
+        login_url_card.pack(fill='x', padx=20, pady=10)
+
+        login_url_grid = ttk.Frame(login_url_card)
+        login_url_grid.pack(fill='x', padx=15, pady=10)
+        login_url_grid.columnconfigure(1, weight=1)
+
+        ttk.Label(login_url_grid, text="Login Page URL:", font=('Segoe UI', 9, 'bold')).grid(row=0, column=0, sticky='w', pady=5, padx=(0, 10))
+        self.login_url_var = tk.StringVar(value=portal_config.get_default_login_url())
+        ttk.Entry(login_url_grid, textvariable=self.login_url_var, style='Compact.TEntry').grid(row=0, column=1, sticky='ew')
+
+        # === Save Button ===
+        save_btn_frame = ttk.Frame(settings_frame)
+        save_btn_frame.pack(fill='x', padx=20, pady=20)
+        
+        save_btn = ttk.Button(save_btn_frame, text="💾 Save All Settings", style='Success.TButton', command=self.save_settings)
+        save_btn.pack(fill='x', ipady=5)
+        
+        # Add some padding at the bottom
+        ttk.Frame(settings_frame, height=20).pack()
+
     def update_license_status_display(self):
         """Update the license status display in the UI"""
         if not hasattr(self, 'license_status_label') or not hasattr(self, 'license_info_label'):
@@ -2312,7 +2813,7 @@ class ManakDesktopApp:
         try:
             # Disable main functionality buttons
             if hasattr(self, 'submit_manak_btn'):
-                self.submit_btn.configure(state='disabled')
+                self.submit_manak_btn.configure(state='disabled')
             if hasattr(self, 'fetch_data_btn'):
                 self.fetch_data_btn.configure(state='disabled')
             if hasattr(self, 'open_btn'):
@@ -2359,18 +2860,177 @@ class ManakDesktopApp:
             # Fallback to console only if GUI fails
             print(f"GUI logging failed for {target}: {e}")
             print(log_message.strip())
+
+    def get_portal_base_url(self):
+        """Current MANAK portal base URL (live or demo) from Settings."""
+        if hasattr(self, 'portal_env_var'):
+            portal_config.set_portal_env(self.portal_env_var.get())
+        return portal_config.get_portal_base_url()
+
+    def build_portal_url(self, path):
+        """Build MANAK portal URL using current environment."""
+        env = self.portal_env_var.get() if hasattr(self, 'portal_env_var') else None
+        return portal_config.build_portal_url(path, env)
+
+    def _on_portal_env_change(self):
+        """Switch login / portal URLs when Live or Demo is selected."""
+        env = self.portal_env_var.get()
+        portal_config.set_portal_env(env)
+        if hasattr(self, 'login_url_var'):
+            self.login_url_var.set(portal_config.swap_portal_base_in_url(self.login_url_var.get(), env))
+        if hasattr(self, 'portal_generate_url_var'):
+            self.portal_generate_url_var.set(
+                portal_config.swap_portal_base_in_url(self.portal_generate_url_var.get(), env)
+            )
+        self._update_portal_env_status_label()
+        if hasattr(self, 'huid_data_processor') and self.huid_data_processor:
+            self.huid_data_processor.articles_url = portal_config.build_portal_url(
+                "/MANAK/NewArticlesListForWeighing", env
+            )
+        label = "Live" if env == portal_config.PORTAL_ENV_LIVE else "Demo"
+        self.log(f"MANAK portal environment: {label} ({portal_config.get_portal_base_url()})", 'system')
+
+    def _update_portal_env_status_label(self):
+        if not hasattr(self, 'portal_env_status_label'):
+            return
+        env = self.portal_env_var.get() if hasattr(self, 'portal_env_var') else portal_config.get_portal_env()
+        base = portal_config.get_portal_base_url(env)
+        name = "Live (production)" if env == portal_config.PORTAL_ENV_LIVE else "Demo (UAT testing)"
+        self.portal_env_status_label.configure(text=f"Active: {name} — {base}")
+
+    def _get_configured_login_url(self):
+        """Return login URL from settings, with safe fallback."""
+        default_url = portal_config.get_default_login_url()
+        if hasattr(self, 'login_url_var'):
+            configured = (self.login_url_var.get() or "").strip()
+            if configured:
+                return configured
+        return default_url
+
+    def _get_insecure_camera_origin(self):
+        """Return origin to allow camera on non-HTTPS MANAK endpoints."""
+        try:
+            from urllib.parse import urlparse
+            candidate = ""
+            if hasattr(self, 'login_url_var') and self.login_url_var.get().strip():
+                candidate = self.login_url_var.get().strip()
+            if not candidate:
+                return ""
+            parsed = urlparse(candidate)
+            if parsed.scheme and parsed.netloc:
+                return f"{parsed.scheme}://{parsed.netloc}"
+        except Exception:
+            pass
+        return ""
     
     def open_browser(self):
         """Open visible Chrome browser and go directly to login page"""
         try:
-            self.log("🚀 Starting Chrome browser...")
+            # Ask user which credentials to use
+            from tkinter import simpledialog
+            
+            # Create custom dialog for credential selection
+            choice_dialog = tk.Toplevel(self.root)
+            choice_dialog.title("Select Login Credentials")
+            choice_dialog.geometry("400x200")
+            choice_dialog.resizable(False, False)
+            choice_dialog.transient(self.root)
+            choice_dialog.grab_set()
+            
+            # Center the dialog
+            choice_dialog.update_idletasks()
+            x = (choice_dialog.winfo_screenwidth() // 2) - (400 // 2)
+            y = (choice_dialog.winfo_screenheight() // 2) - (200 // 2)
+            choice_dialog.geometry(f"400x200+{x}+{y}")
+            
+            selected_cred = tk.StringVar(value="qm")
+            
+            # Header
+            header_label = ttk.Label(choice_dialog, text="Choose BIS Portal Credentials", font=('Segoe UI', 12, 'bold'))
+            header_label.pack(pady=15)
+            
+            # Radio buttons frame
+            radio_frame = ttk.Frame(choice_dialog)
+            radio_frame.pack(pady=10)
+            
+            # QM option
+            qm_radio = ttk.Radiobutton(
+                radio_frame, 
+                text="🔵 QM Login (Weight Entry, HUID, etc.)", 
+                variable=selected_cred, 
+                value="qm",
+                style='Compact.TRadiobutton'
+            )
+            qm_radio.pack(anchor='w', pady=5, padx=20)
+            
+            # Reception option
+            reception_radio = ttk.Radiobutton(
+                radio_frame, 
+                text="🟢 Reception Login (Accept Request)", 
+                variable=selected_cred, 
+                value="reception",
+                style='Compact.TRadiobutton'
+            )
+            reception_radio.pack(anchor='w', pady=5, padx=20)
+            
+            # Buttons
+            button_frame = ttk.Frame(choice_dialog)
+            button_frame.pack(pady=15)
+            
+            def on_ok():
+                self.selected_credential_type = selected_cred.get()
+                choice_dialog.destroy()
+            
+            def on_cancel():
+                self.selected_credential_type = None
+                choice_dialog.destroy()
+            
+            ok_btn = ttk.Button(button_frame, text="✅ Continue", command=on_ok, style='Success.TButton', width=12)
+            ok_btn.pack(side='left', padx=5)
+            
+            cancel_btn = ttk.Button(button_frame, text="❌ Cancel", command=on_cancel, style='Danger.TButton', width=12)
+            cancel_btn.pack(side='left', padx=5)
+            
+            # Wait for dialog to close
+            choice_dialog.wait_window()
+            
+            # Check if user cancelled
+            if not hasattr(self, 'selected_credential_type') or self.selected_credential_type is None:
+                self.log("ℹ️ Browser opening cancelled by user")
+                return
+            
+            self.log(f"🚀 Starting Chrome browser with {self.selected_credential_type.upper()} credentials...")
             chrome_options = Options()
             chrome_options.add_argument("--no-sandbox")
             chrome_options.add_argument("--disable-dev-shm-usage")
             chrome_options.add_argument("--window-size=1280,720")
             chrome_options.add_argument("--disable-web-security")
             chrome_options.add_argument("--allow-running-insecure-content")
+            chrome_options.add_argument("--use-fake-ui-for-media-stream")
+            chrome_options.add_argument("--disable-features=WebSerial")
+            chrome_options.add_argument("--disable-blink-features=WebSerial")
+            chrome_options.add_argument("--disable-device-discovery-notifications")
+            insecure_origin = self._get_insecure_camera_origin()
+            if insecure_origin:
+                chrome_options.add_argument(f"--unsafely-treat-insecure-origin-as-secure={insecure_origin}")
             chrome_options.add_experimental_option("detach", True)
+            
+            # Configure download directory
+            import os
+            self.download_dir = os.path.join(os.getcwd(), 'downloads')
+            if not os.path.exists(self.download_dir):
+                os.makedirs(self.download_dir)
+            
+            prefs = {
+                "download.default_directory": self.download_dir,
+                "download.prompt_for_download": False,
+                "download.directory_upgrade": True,
+                "plugins.always_open_pdf_externally": True,  # Force download PDF
+                "profile.default_content_setting_values.media_stream_camera": 1,
+                "profile.default_content_setting_values.media_stream_mic": 1,
+                "profile.default_content_setting_values.serial_port": 2,
+            }
+            chrome_options.add_experimental_option("prefs", prefs)
             
             try:
                 from selenium.webdriver.chrome.service import Service
@@ -2384,22 +3044,49 @@ class ManakDesktopApp:
             
             # Update multiple jobs processor with driver now that it's available
             if self.multiple_jobs_processor:
-                self.multiple_jobs_processor.driver = self.driver
+                self.multiple_jobs_processor.driver = self.driver # type: ignore # type: ignore
                 self.multiple_jobs_processor.main_log_callback = self.log
             
+            # Update delivery voucher scanner with driver
+            self.log(f"DEBUG: Checking delivery_voucher_scanner: {self.delivery_voucher_scanner is not None}", 'system')
+            if self.delivery_voucher_scanner:
+                self.log(f"DEBUG: Assigning driver to scanner...", 'system')
+                self.delivery_voucher_scanner.driver = self.driver
+                self.log(f"✅ Assigned driver to delivery voucher scanner", 'system')
+            else:
+                self.log(f"⚠️ Delivery voucher scanner is None", 'system')
             
-            if self.job_cards_processor:
-                self.job_cards_processor.driver = self.driver
-                self.job_cards_processor.main_log_callback = self.log
+            # Update jeweller request generator with driver (Reception specific)
+            try:
+                if hasattr(self, 'jeweller_request_generator') and self.jeweller_request_generator:
+                    self.jeweller_request_generator.driver = self.reception_driver
+                    if self.reception_driver:
+                        self.log(f"✅ Assigned reception driver to jeweller request generator", 'system')
+            except Exception as e:
+                self.log(f"⚠️ Error assigning driver to jeweller request generator: {e}", 'system')
+            
+            if self.simple_job_creator:
+                self.simple_job_creator.driver = self.driver # type: ignore
+                self.simple_job_creator.main_log_callback = self.log
+            
+            # Update completed jobs scanner with driver
+            if hasattr(self, 'completed_jobs_scanner') and self.completed_jobs_scanner:
+                self.completed_jobs_scanner.driver = self.driver
+                self.log(f"✅ Assigned driver to completed jobs scanner", 'system')
+            
+            # Update bill import processor with driver
+            if hasattr(self, 'bill_import_processor') and self.bill_import_processor:
+                self.bill_import_processor.driver = self.driver # type: ignore
+                self.log(f"✅ Assigned driver to bill import processor", 'system')
             
             if self.delivery_voucher_processor:
-                self.delivery_voucher_processor.driver = self.driver
+                self.delivery_voucher_processor.driver = self.driver # type: ignore
                 self.delivery_voucher_processor.main_log_callback = self.log
             
             if hasattr(self, 'weight_capture_processor') and self.weight_capture_processor:
-                self.weight_capture_processor.driver = self.driver
+                self.weight_capture_processor.driver = self.driver # type: ignore
                 self.weight_capture_processor.main_log_callback = self.log
-            
+
             # Update HUID data processor with driver now that it's available
             if hasattr(self, 'huid_data_processor') and self.huid_data_processor:
                 self.huid_data_processor.driver = self.driver
@@ -2407,8 +3094,10 @@ class ManakDesktopApp:
             
             self.log("✅ Browser opened successfully!")
             
-            # Go directly to login page
-            self.driver.get("https://huid.manakonline.in/MANAK/eBISLogin")
+            # Go directly to configured login page
+            login_url = self._get_configured_login_url()
+            self.log(f"🔑 Opening login page: {login_url}")
+            self.driver.get(login_url)
             self._auto_fill_login_credentials()
             
             # Update button states
@@ -2422,15 +3111,16 @@ class ManakDesktopApp:
             messagebox.showerror("Browser Error", f"Failed to open browser: {str(e)}")
 
     def navigate_to_login(self):
-        """Navigate to MANAK portal login page"""
+        """Navigate to MANAK portal login page using configured URL"""
         if not self.driver:
             messagebox.showwarning("No Browser", "Please open browser first")
             return
             
         try:
-            self.log("🔑 Navigating to MANAK portal login page...")
-            portal_url = "https://huid.manakonline.in/MANAK/eBISLogin"
-            self.driver.get(portal_url)
+            login_url = self._get_configured_login_url()
+            
+            self.log(f"🔑 Navigating to login page: {login_url}...")
+            self.driver.get(login_url)
             time.sleep(3)
             self._auto_fill_login_credentials()
             
@@ -2442,7 +3132,11 @@ class ManakDesktopApp:
             self.log(f"❌ Error navigating to portal: {str(e)}")
 
     def _auto_fill_login_credentials(self):
-        """Auto-fill username and password on the login page"""
+        """Auto-fill username and password on the login page based on user's credential selection"""
+        if not self.driver:
+            self.log("❌ WebDriver not initialized", 'system')
+            return
+            
         try:
             WebDriverWait(self.driver, 10).until(lambda d: '/eBISLogin' in d.current_url)
             
@@ -2456,10 +3150,28 @@ class ManakDesktopApp:
             except:
                 pass_field = self.driver.find_element(By.NAME, 'passwd')
             
+            # Use the credential type selected by user in the dialog
+            try:
+                if hasattr(self, 'selected_credential_type') and self.selected_credential_type == 'reception':
+                    # Use Reception credentials
+                    username = self.reception_username_var.get() if hasattr(self, 'reception_username_var') and self.reception_username_var.get() else self.username_var.get()
+                    password = self.reception_password_var.get() if hasattr(self, 'reception_password_var') and self.reception_password_var.get() else self.password_var.get()
+                    self.log(f"✅ Using Reception credentials (User Selected)")
+                else:
+                    # Use QM credentials (default)
+                    username = self.username_var.get()
+                    password = self.password_var.get()
+                    self.log(f"✅ Using QM credentials (User Selected)")
+            except Exception as e:
+                # Fallback to QM credentials if selection fails
+                username = self.username_var.get()
+                password = self.password_var.get()
+                self.log(f"⚠️ Credential selection failed, using QM credentials: {str(e)}")
+            
             user_field.clear()
-            user_field.send_keys(self.username_var.get())
+            user_field.send_keys(username)
             pass_field.clear()
-            pass_field.send_keys(self.password_var.get())
+            pass_field.send_keys(password)
             
             self.log("✅ Credentials auto-filled. Please enter CAPTCHA and login.")
             
@@ -2482,13 +3194,17 @@ class ManakDesktopApp:
             if any(indicator in page_text for indicator in ['login', 'signin', 'captcha', 'username']):
                 self.logged_in = False
                 self.log("⚠️ Still on login page - please complete login")
+                return False
             else:
-                            self.logged_in = True
-            self.log("✅ Login appears successful!")
-            self.submit_manak_btn.config(state='normal')
+                self.logged_in = True
+                self.log("✅ Login appears successful!")
+                if hasattr(self, 'submit_manak_btn'):
+                    self.submit_manak_btn.config(state='normal')
+                return True
                 
         except Exception as e:
             self.log(f"❌ Error checking login: {str(e)}")
+            return False
             
     def load_weight_page(self):
         """Load weight entry page for specific request"""
@@ -2511,9 +3227,11 @@ class ManakDesktopApp:
             self._clear_validation_error(self.request_entry)
             
             # Construct URL
-            weight_url = f"https://huid.manakonline.in/MANAK/SamplingweightingDeatils?requestNo={request_no}"
+            encoded_request = base64.b64encode(str(request_no).encode()).decode()
+            weight_url = f"{portal_config.portal_base()}/MANAK/UID_WeighingForm?requestNo={encoded_request}"
             if job_no:
-                weight_url += f"&jobNo={job_no}"
+                encoded_job = base64.b64encode(str(job_no).encode()).decode()
+                weight_url += f"&jobNo={encoded_job}"
                 
             self.log(f"📄 Loading weight page: {weight_url}", 'weight')
             
@@ -2540,9 +3258,12 @@ class ManakDesktopApp:
             
             if total_fields > 0:
                 self.page_loaded = True
-                self.auto_fill_btn.config(state='normal')
-                self.select_lot_btn.config(state='normal')
-                self.auto_workflow_btn.config(state='normal')
+                if hasattr(self, 'auto_fill_btn') and self.auto_fill_btn:
+                    self.auto_fill_btn.config(state='normal')
+                if hasattr(self, 'select_lot_btn') and self.select_lot_btn:
+                    self.select_lot_btn.config(state='normal')
+                if hasattr(self, 'auto_workflow_btn') and self.auto_workflow_btn:
+                    self.auto_workflow_btn.config(state='normal')
                 self.log("✅ Weight page loaded - ready for automation", 'weight')
             else:
                 self.log("⚠️ No weight fields detected", 'weight')
@@ -2621,6 +3342,86 @@ class ManakDesktopApp:
                 if hasattr(self, 'portal_password_var') and 'portal_password' in settings:
                     self.portal_password_var.set(settings['portal_password'])
                     
+                # Load reception credentials
+                if hasattr(self, 'reception_username_var') and 'reception_username' in settings:
+                    self.reception_username_var.set(settings['reception_username'])
+                if hasattr(self, 'reception_password_var') and 'reception_password' in settings:
+                    self.reception_password_var.set(settings['reception_password'])
+
+                # Load MANAK portal environment (live / demo) and portal URLs
+                env = settings.get('portal_env', portal_config.DEFAULT_PORTAL_ENV)
+                portal_config.set_portal_env(env)
+                if hasattr(self, 'portal_env_var'):
+                    self.portal_env_var.set(env)
+                if hasattr(self, 'portal_generate_url_var'):
+                    if 'portal_generate_url' in settings:
+                        self.portal_generate_url_var.set(
+                            portal_config.swap_portal_base_in_url(settings['portal_generate_url'], env)
+                        )
+                    else:
+                        self.portal_generate_url_var.set(portal_config.get_default_portal_generate_url(env))
+                if hasattr(self, 'login_url_var'):
+                    if 'login_url' in settings:
+                        self.login_url_var.set(
+                            portal_config.swap_portal_base_in_url(settings['login_url'], env)
+                        )
+                    else:
+                        self.login_url_var.set(portal_config.get_default_login_url(env))
+                if hasattr(self, 'portal_env_status_label'):
+                    self._update_portal_env_status_label()
+
+                # Load API Configuration
+                if hasattr(self, 'api_base_url_var') and 'api_base_url' in settings:
+                    base_url = settings['api_base_url'].strip()
+                    self.api_base_url_var.set(base_url)
+                    
+                    # Update config if base URL is provided
+                    if base_url:
+                        if not base_url.endswith('/'):
+                            base_url += '/'
+                        
+                        # Update global config constants
+                        try:
+                            config.JEWELLER_API_URL = base_url + "get_jewellers_api.php"
+                            config.CHECK_JOBS_API_URL = base_url + "check_jobs_api.php"
+                            config.MANAGE_JEWELLER_API_URL = base_url + "manage_jeweller_api.php"
+                            config.SAVE_JOB_API_URL = base_url + "save_job_api.php"
+                            config.REPORT_API_URL = base_url + "get_report_by_id.php"
+                            config.GET_JOBS_API_URL = base_url + "get_jobs_api.php"
+                            config.REQUEST_API_URL = base_url + "API/get_request_no.php"
+                            
+                            # Only log in debug mode to avoid exposing infrastructure
+                            if config.APP_CONFIG.get('debug_mode'):
+                                self.log(f"🔧 API configuration updated", 'status')
+                        except Exception as e:
+                            self.log(f"⚠️ Error updating config constants: {str(e)}", 'status')
+                    
+                # Load individual API overrides (if present, they override base URL defaults)
+                if hasattr(self, 'jeweller_api_url_var') and 'jeweller_api_url' in settings:
+                    url = settings['jeweller_api_url']
+                    self.jeweller_api_url_var.set(url)
+                    config.JEWELLER_API_URL = url
+                    
+                if hasattr(self, 'check_jobs_api_url_var') and 'check_jobs_api_url' in settings:
+                    url = settings['check_jobs_api_url']
+                    self.check_jobs_api_url_var.set(url)
+                    config.CHECK_JOBS_API_URL = url
+                    
+                if hasattr(self, 'manage_jeweller_api_url_var') and 'manage_jeweller_api_url' in settings:
+                    url = settings['manage_jeweller_api_url']
+                    self.manage_jeweller_api_url_var.set(url)
+                    config.MANAGE_JEWELLER_API_URL = url
+                    
+                if hasattr(self, 'save_job_api_url_var') and 'save_job_api_url' in settings:
+                    url = settings['save_job_api_url']
+                    self.save_job_api_url_var.set(url)
+                    config.SAVE_JOB_API_URL = url
+                    
+                if hasattr(self, 'get_jobs_api_url_var') and 'get_jobs_api_url' in settings:
+                    url = settings['get_jobs_api_url']
+                    self.get_jobs_api_url_var.set(url)
+                    config.GET_JOBS_API_URL = url
+
                 self.log("✅ Settings loaded from config file", 'status')
             else:
                 self.log("ℹ️ No saved settings found, using defaults", 'status')
@@ -2711,7 +3512,53 @@ class ManakDesktopApp:
             # Update job cards processor with new firm ID
             if hasattr(self, 'job_cards_processor') and self.job_cards_processor:
                 self.job_cards_processor.update_firm_id_from_settings()
-            
+
+            # Update API configuration immediately
+            # Priority 1: Individual overrides if present and modified? 
+            # Simplified: Use Base URL to drive defaults, but if we want to support overrides, we need to save them.
+            # For now, let's stick to Base URL driving everything to avoid confusion, 
+            # unless we want to support mixed mode. 
+            # The prompt says "dynamic API settings" -> usually implies base URL switching.
+            # But since I added the advanced fields, I should probably respect them if visible?
+            # Let's just update based on the Base URL for consistency as requested by the user's "dynamic link" goal.
+            # The individual fields are currently just displaying what the Base URL would generate, 
+            # unless I bind them to update automatically when Base URL changes.
+            # Actually, let's just use the Base URL logic for now to ensure robustness.
+            if 'api_base_url' in settings:
+                base_url = settings['api_base_url'].strip()
+                if base_url:
+                    if not base_url.endswith('/'):
+                        base_url += '/'
+                    
+                    # Update config constants
+                    config.JEWELLER_API_URL = base_url + "get_jewellers_api.php"
+                    config.CHECK_JOBS_API_URL = base_url + "check_jobs_api.php"
+                    config.MANAGE_JEWELLER_API_URL = base_url + "manage_jeweller_api.php"
+                    config.SAVE_JOB_API_URL = base_url + "save_job_api.php"
+                    config.REPORT_API_URL = base_url + "get_report_by_id.php"
+                    config.GET_JOBS_API_URL = base_url + "get_jobs_api.php"
+                    config.REQUEST_API_URL = base_url + "API/get_request_no.php"
+                    
+                    # Only log in debug mode to avoid exposing infrastructure
+                    if config.APP_CONFIG.get('debug_mode'):
+                        self.log(f"🔧 API configuration synchronized", 'status')
+                    
+                    # Update the advanced fields variables to reflect the change
+                    if hasattr(self, 'jeweller_api_url_var'):
+                        self.jeweller_api_url_var.set(config.JEWELLER_API_URL)
+                    if hasattr(self, 'check_jobs_api_url_var'):
+                        self.check_jobs_api_url_var.set(config.CHECK_JOBS_API_URL)
+                    if hasattr(self, 'manage_jeweller_api_url_var'):
+                        self.manage_jeweller_api_url_var.set(config.MANAGE_JEWELLER_API_URL)
+                    if hasattr(self, 'save_job_api_url_var'):
+                        self.save_job_api_url_var.set(config.SAVE_JOB_API_URL)
+                    if hasattr(self, 'report_api_url_var'):
+                        self.report_api_url_var.set(config.REPORT_API_URL)
+                    if hasattr(self, 'get_jobs_api_url_var'):
+                        self.get_jobs_api_url_var.set(config.GET_JOBS_API_URL)
+                    if hasattr(self, 'request_api_url_var'):
+                        self.request_api_url_var.set(config.REQUEST_API_URL)
+
             messagebox.showinfo("Settings Saved", "✅ Settings saved successfully!")
             self.log("💾 Settings saved to config/app_settings.json", 'status')
         except Exception as e:
@@ -2721,6 +3568,7 @@ class ManakDesktopApp:
             except Exception:
                 print(f"Error saving settings: {str(e)}")
     
+
     def close_browser(self):
         """Close browser and reset state"""
         try:
@@ -2736,12 +3584,171 @@ class ManakDesktopApp:
             self.login_btn.config(state='disabled')
             self.check_btn.config(state='disabled')
             self.close_btn.config(state='disabled')
-            self.submit_manak_btn.config(state='disabled')
+            if hasattr(self, 'submit_manak_btn'):
+                self.submit_manak_btn.config(state='disabled')
             
             self.log("✅ Browser closed")
             
         except Exception as e:
             self.log(f"❌ Error closing browser: {str(e)}")
+
+    def open_reception_browser(self):
+        """Open a separate browser instance for Reception tasks"""
+        try:
+            self.log("🚀 Launching Reception Chrome...", 'status')
+            
+            # Setup Chrome options
+            chrome_options = Options()
+            chrome_options.add_argument("--start-maximized")
+            chrome_options.add_argument("--disable-notifications")
+            chrome_options.add_argument("--disable-web-security")
+            chrome_options.add_argument("--allow-running-insecure-content")
+            chrome_options.add_argument("--use-fake-ui-for-media-stream")
+            insecure_origin = self._get_insecure_camera_origin()
+            if insecure_origin:
+                chrome_options.add_argument(f"--unsafely-treat-insecure-origin-as-secure={insecure_origin}")
+
+            # Create driver with fallback logic matching open_browser
+            try:
+                from selenium.webdriver.chrome.service import Service
+                # Try specific path (legacy/nix support)
+                chromedriver_path = "/nix/store/x423854737d94f27621183556-chromedriver-115.0.5790.170/bin/chromedriver"
+                if os.path.exists(chromedriver_path):
+                    service = Service(chromedriver_path)
+                    self.reception_driver = webdriver.Chrome(service=service, options=chrome_options)
+                else:
+                    raise Exception("Specific driver path not found")
+            except:
+                # Fallback to default (let Selenium Manager handle it or use PATH)
+                self.reception_driver = webdriver.Chrome(options=chrome_options)
+            
+            self.log("✅ Reception Browser Launched successfully", 'status')
+            
+            # Navigate to configured login page
+            reception_login_url = self._get_configured_login_url()
+            self.log(f"🔑 Opening reception login page: {reception_login_url}", 'status')
+            self.reception_driver.get(reception_login_url)
+            
+            # Auto-fill credentials
+            self.root.after(2000, self._auto_fill_reception_login_credentials)
+            
+            # Update button states
+            if hasattr(self, 'open_reception_btn_main'):
+                self.open_reception_btn_main.config(state='disabled')
+                self.close_reception_btn_main.config(state='normal')
+            
+            # Update jeweller request generator to use reception browser
+            try:
+                if hasattr(self, 'jeweller_request_generator') and self.jeweller_request_generator:
+                    self.jeweller_request_generator.driver = self.reception_driver
+                    self.log(f"✅ Assigned reception driver to jeweller request generator", 'system')
+            except Exception as e:
+                self.log(f"⚠️ Error assigning reception driver to jeweller request generator: {e}", 'system')
+
+            
+        except Exception as e:
+            self.log(f"❌ Error opening reception browser: {str(e)}", 'status')
+            messagebox.showerror("Browser Error", f"Failed to open reception browser: {str(e)}")
+
+    def close_reception_browser(self):
+        """Close Reception browser"""
+        try:
+            if self.reception_driver:
+                self.reception_driver.quit()
+                self.reception_driver = None
+                
+            # Reset button states
+            if hasattr(self, 'open_reception_btn_main'):
+                self.open_reception_btn_main.config(state='normal')
+                self.close_reception_btn_main.config(state='disabled')
+            
+            self.log("✅ Reception Browser closed", 'status')
+            
+        except Exception as e:
+            self.log(f"❌ Error closing reception browser: {str(e)}", 'status')
+
+    def _auto_fill_reception_login_credentials(self):
+        """Auto-fill login credentials for Reception browser"""
+        try:
+            if not self.reception_driver:
+                return
+
+            # Wait for URL content to ensure page loaded
+            try:
+                WebDriverWait(self.reception_driver, 10).until(lambda d: '/eBISLogin' in d.current_url or '/login' in d.current_url)
+            except:
+                self.log("⚠️ Timeout waiting for login page load", 'status')
+            
+            # Get credentials (prioritize reception specific, fallback to main)
+            username = ""
+            password = ""
+            
+            if hasattr(self, 'reception_username_var') and self.reception_username_var.get():
+                username = self.reception_username_var.get()
+            elif hasattr(self, 'portal_username_var'):
+                username = self.portal_username_var.get()
+                
+            if hasattr(self, 'reception_password_var') and self.reception_password_var.get():
+                password = self.reception_password_var.get()
+            elif hasattr(self, 'portal_password_var'):
+                password = self.portal_password_var.get()
+                
+            if username and password:
+                user_field = None
+                pass_field = None
+                
+                # Robust User Field Search
+                user_selectors = [
+                    (By.ID, "userId"),
+                    (By.NAME, "userId"),
+                    (By.ID, "InputEmail"), # Common on eBISLogin
+                    (By.NAME, "username"),
+                    (By.ID, "username"),
+                    (By.NAME, "loginId")
+                ]
+                
+                for by, value in user_selectors:
+                    try:
+                        element = self.reception_driver.find_element(by, value)
+                        if element.is_displayed():
+                            user_field = element
+                            break
+                    except:
+                        continue
+                        
+                # Robust Password Field Search
+                pass_selectors = [
+                    (By.ID, "password"),
+                    (By.NAME, "password"),
+                    (By.ID, "InputPassword"), # Common on eBISLogin
+                    (By.NAME, "passwd")
+                ]
+                
+                for by, value in pass_selectors:
+                    try:
+                        element = self.reception_driver.find_element(by, value)
+                        if element.is_displayed():
+                            pass_field = element
+                            break
+                    except:
+                        continue
+                
+                if user_field and pass_field:
+                    try:
+                        user_field.clear()
+                        user_field.send_keys(username)
+                        pass_field.clear()
+                        pass_field.send_keys(password)
+                        
+                        self.log("✅ Reception Credentials auto-filled", 'status')
+                        
+                    except Exception as e:
+                        self.log(f"⚠️ Could not fill fields: {e}", 'status')
+                else:
+                    self.log(f"⚠️ Could not find login fields. Url: {self.reception_driver.current_url}", 'status')
+            
+        except Exception as e:
+            self.log(f"⚠️ Error auto-filling reception login: {str(e)}", 'status')
 
     def smart_fetch_data(self):
         """Fetch data from API only"""
@@ -2772,6 +3779,12 @@ class ManakDesktopApp:
         """Fetch job and strip data from the server and auto-fill first lot"""
         if not self.check_license_before_action("API data fetching"):
             return
+            
+        # Safety check for job_entry
+        if not hasattr(self, 'job_entry') or not self.job_entry:
+            self.log("❌ Job Entry field not found (Single Jobs tab inactive)", 'error')
+            return
+            
         job_no = self.job_entry.get().strip()
         if not job_no:
             self._show_validation_error(self.job_entry, "Job Number is required!")
@@ -3252,27 +4265,168 @@ class ManakDesktopApp:
             self.fetch_data_btn.config(state='disabled')
 
     def setup_accept_request_tab(self):
-        """Setup Accept Request tab with full automation"""
+        """Setup Accept Request tab with enhanced horizontal UI"""
         accept_frame = ttk.Frame(self.notebook)
         self.notebook.add(accept_frame, text="✅ Accept Request")
         
-        # Main horizontal layout
-        main_horizontal = ttk.Frame(accept_frame)
-        main_horizontal.pack(fill='both', expand=True, padx=8, pady=8)
+        # 1. Top Bar: Controls (Full Width)
+        controls_frame = ttk.Frame(accept_frame, padding="5 5 5 5")
+        controls_frame.pack(fill='x', side='top')
         
-        # LEFT SECTION - Controls (30% width)
-        left_section = ttk.Frame(main_horizontal)
-        left_section.pack(side='left', fill='y', padx=(0, 8))
+        # Left: Action Buttons
+        ttk.Button(controls_frame, text="📋 Fetch Requests", style='Info.TButton', 
+                   command=self.fetch_request_list).pack(side='left', padx=2)
+                   
+        self.auto_acknowledge_all_btn = ttk.Button(controls_frame, text="🤖 Auto Acknowledge All", 
+                                                 style='Success.TButton', command=self.auto_acknowledge_all_requests,
+                                                 state='disabled')
+        self.auto_acknowledge_all_btn.pack(side='left', padx=2)
         
-        # RIGHT SECTION - Request List (70% width)
-        right_section = ttk.Frame(main_horizontal)
-        right_section.pack(side='right', fill='both', expand=True)
+        self.clear_requests_btn = ttk.Button(controls_frame, text="🧹 Clear List", 
+                                           style='Danger.TButton', command=self.clear_request_list).pack(side='left', padx=2)
+
+        # Settings Checkboxes (Next to buttons)
+        self.save_job_data_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(controls_frame, text="Save Job Data", variable=self.save_job_data_var).pack(side='left', padx=10)
         
-        # === LEFT SECTION CONTENT ===
-        self.setup_accept_request_left_section(left_section)
+        self.auto_fill_qty_weight_var = tk.BooleanVar(value=True)
+        # Hidden or available? User didn't ask, but logic needs it. I'll keep it active but hidden to unclutter, or add small checkbox.
+        # Adding small checkbox
+        ttk.Checkbutton(controls_frame, text="Auto-fill Wt", variable=self.auto_fill_qty_weight_var).pack(side='left', padx=5)
+
+        # Right: Toggles
+        # Log Toggle
+        self.show_log_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(controls_frame, text="Show Log", variable=self.show_log_var, 
+                      command=self.toggle_log_panel).pack(side='right', padx=2)
+
+        # Tag Manager Button
+        ttk.Button(controls_frame, text="⚙️ Manage Tags", command=self.show_tag_manager).pack(side='right', padx=2)
         
-        # === RIGHT SECTION CONTENT ===
-        self.setup_accept_request_right_section(right_section)
+        # Status Label (Compact)
+        self.status_var = tk.StringVar(value="Ready")
+        ttk.Label(controls_frame, textvariable=self.status_var, font=('Segoe UI', 9), foreground='#666').pack(side='right', padx=10)
+
+        # 2. Main Content: Table (Full Width)
+        table_frame = ttk.Frame(accept_frame, padding=5)
+        table_frame.pack(fill='both', expand=True)
+        
+        # Columns: Added 'Tag Prefix'
+        columns = ('S.No.', 'Request No.', 'Jeweller Name', 'Address', 'Tag Prefix', 'Status', 'Action')
+        
+        self.request_tree = ttk.Treeview(table_frame, columns=columns, show='headings')
+        
+        # Configure columns
+        self.request_tree.heading('S.No.', text='S.No.')
+        self.request_tree.column('S.No.', width=50, minwidth=50, anchor='center')
+        
+        self.request_tree.heading('Request No.', text='Request No.')
+        self.request_tree.column('Request No.', width=100, minwidth=100)
+        
+        self.request_tree.heading('Jeweller Name', text='Jeweller Name')
+        self.request_tree.column('Jeweller Name', width=200, minwidth=150)
+        
+        self.request_tree.heading('Address', text='Address')
+        self.request_tree.column('Address', width=150, minwidth=100)
+        
+        self.request_tree.heading('Tag Prefix', text='Tag Prefix (Edit)')
+        self.request_tree.column('Tag Prefix', width=100, minwidth=80, anchor='center')
+        
+        self.request_tree.heading('Status', text='Status')
+        self.request_tree.column('Status', width=100, minwidth=100)
+        
+        self.request_tree.heading('Action', text='Action')
+        self.request_tree.column('Action', width=80, minwidth=80, anchor='center')
+        
+        # Scrollbars
+        y_scroll = ttk.Scrollbar(table_frame, orient='vertical', command=self.request_tree.yview)
+        x_scroll = ttk.Scrollbar(table_frame, orient='horizontal', command=self.request_tree.xview)
+        self.request_tree.configure(yscrollcommand=y_scroll.set, xscrollcommand=x_scroll.set)
+        
+        self.request_tree.pack(side='left', fill='both', expand=True)
+        y_scroll.pack(side='right', fill='y')
+        x_scroll.pack(side='bottom', fill='x')
+        
+        # Bindings
+        self.request_tree.bind('<Double-1>', self.on_request_tree_double_click)
+        
+        # 3. Log Panel (Initial State: Hidden)
+        self.log_container = ttk.Frame(accept_frame)
+        
+        log_label = ttk.Label(self.log_container, text="📝 Acknowledge Log", font=('Segoe UI', 9, 'bold'))
+        log_label.pack(anchor='w', padx=5, pady=(5,0))
+        
+        self.acknowledge_log = scrolledtext.ScrolledText(self.log_container, height=8, font=('Consolas', 8), 
+                                                       bg='#f8f9fa', fg='#495057')
+        self.acknowledge_log.pack(fill='both', expand=True, padx=5, pady=5)
+
+        # Initialize vars
+        self.request_data = [] # Store raw data
+        self.tag_prefix_var = tk.StringVar(value="") # Keeps compatibility
+        
+        # Initial Log State
+        if self.show_log_var.get():
+             self.log_container.pack(fill='both', expand=False, side='bottom', padx=5, pady=5)
+
+    def toggle_log_panel(self):
+        if self.show_log_var.get():
+            self.log_container.pack(fill='both', expand=False, side='bottom', padx=5, pady=5)
+        else:
+            self.log_container.pack_forget()
+
+    def show_tag_manager(self): # type: ignore
+        """Show the Tag Manager dialog"""
+        if getattr(self, 'tag_manager', None):
+            self.tag_manager.show_editor(self.root) # type: ignore
+        else:
+            messagebox.showerror("Error", "TagManager module not available.")
+
+    def on_request_tree_double_click(self, event):
+        region = self.request_tree.identify("region", event.x, event.y)
+        if region != "cell":
+            return
+            
+        column = self.request_tree.identify_column(event.x)
+        item_id = self.request_tree.identify_row(event.y)
+        if not item_id: return
+        
+        # Get column name. #1 is S.No., #5 is Tag Prefix
+        # Columns: S.No, ReqNo, JewellerName, Address, TagPrefix, Status, Action
+        # Indices: 0, 1, 2, 3, 4, 5, 6
+        
+        col_idx = int(column.replace('#', '')) - 1
+        
+        # Check if Tag Prefix column (index 4)
+        if col_idx == 4:
+            self.edit_tree_cell(item_id, column, 'tag_prefix')
+        elif col_idx == 6: # Action
+             self.on_request_double_click(event)
+
+    def edit_tree_cell(self, item_id, column, data_key):
+        x, y, w, h = self.request_tree.bbox(item_id, column)
+        entry = ttk.Entry(self.request_tree)
+        entry.place(x=x, y=y, width=w, height=h)
+        
+        current_val = self.request_tree.set(item_id, column)
+        entry.insert(0, str(current_val) if current_val is not None else "")
+        entry.select_range(0, tk.END)
+        entry.focus()
+        
+        def save_edit(event=None):
+            new_val = entry.get()
+            self.request_tree.set(item_id, column, new_val)
+            entry.destroy()
+            
+            # Update data
+            values = self.request_tree.item(item_id, 'values')
+            req_no = values[1]
+            for req in self.request_data:
+                if req['request_no'] == req_no:
+                    req[data_key] = new_val
+                    break
+        
+        entry.bind('<Return>', save_edit)
+        entry.bind('<FocusOut>', lambda e: save_edit())
         
     def setup_accept_request_left_section(self, parent):
         """Setup left section with controls and settings"""
@@ -3318,10 +4472,32 @@ class ManakDesktopApp:
                                      variable=self.auto_fill_qty_weight_var)
         auto_fill_cb.pack(anchor='w', pady=2)
         
+        # Save Job Data checkbox
+        self.save_job_data_var = tk.BooleanVar(value=True)
+        save_job_cb = ttk.Checkbutton(settings_frame, text="Save Request Data to Job Card Database", 
+                                     variable=self.save_job_data_var)
+        save_job_cb.pack(anchor='w', pady=2)
+        
         # Auto-print voucher checkbox (always enabled now)
         auto_print_label = ttk.Label(settings_frame, text="✅ Voucher Print: Always enabled", 
                                    font=('Segoe UI', 8, 'italic'), foreground='#28a745')
         auto_print_label.pack(anchor='w', pady=2)
+        
+        # Tag Prefix Pattern
+        ttk.Label(settings_frame, text="Tag Prefix Pattern:", font=('Segoe UI', 8, 'bold')).pack(anchor='w', pady=(8, 2))
+        self.tag_prefix_var = tk.StringVar(value="")
+        
+        # Frame for Entry + Manage Button
+        tag_frame = ttk.Frame(settings_frame)
+        tag_frame.pack(fill='x', pady=2)
+        
+        self.tag_prefix_entry = ttk.Entry(tag_frame, textvariable=self.tag_prefix_var)
+        self.tag_prefix_entry.pack(side='left', fill='x', expand=True, padx=(0, 2))
+        
+        # Manage Button
+        ttk.Button(tag_frame, text="⚙️", width=3, command=self.show_tag_manager).pack(side='right')
+        
+        ttk.Label(settings_frame, text="(e.g. ABC - Default / Optional)", font=('Segoe UI', 7, 'italic'), foreground='#6c757d').pack(anchor='w', pady=0)
         
         # Status card
         status_card = ttk.LabelFrame(parent, text="📊 Status", style='Compact.TLabelframe')
@@ -3351,6 +4527,15 @@ class ManakDesktopApp:
         self.acknowledge_log = scrolledtext.ScrolledText(log_card, height=8, font=('Consolas', 7), 
                                                        bg='#f8f9fa', fg='#495057', wrap=tk.WORD)
         self.acknowledge_log.pack(fill='both', expand=True, padx=8, pady=8)
+        
+        self.acknowledge_log.pack(fill='both', expand=True, padx=8, pady=8)
+
+    def show_tag_manager(self):
+        """Show the Tag Manager dialog"""
+        if getattr(self, 'tag_manager', None):
+            self.tag_manager.show_editor(self.root)
+        else:
+            messagebox.showerror("Error", "TagManager module not available.")
         
     def setup_accept_request_right_section(self, parent):
         """Setup right section with request list table"""
@@ -3394,114 +4579,401 @@ class ManakDesktopApp:
         # Store request data
         self.request_data = []
         
+    def _map_request_list_columns(self, header_texts):
+        """Map column index for received-request list (live + UAT layouts)."""
+        col = {}
+        for i, raw in enumerate(header_texts):
+            h = (raw or '').strip().lower().replace('\n', ' ')
+            if 's.no' in h or h.startswith('s no') or h == 'sl' or h == 'sl.':
+                col['sno'] = i
+            elif 'request no' in h:
+                col['request_no'] = i
+            elif 'request date' in h or (h == 'date' and 'request_date' not in col):
+                col['request_date'] = i
+            elif 'jeweller name' in h or 'outlet name' in h or h == 'name':
+                col['jeweller_name'] = i
+            elif 'jeweller address' in h or ('address' in h and 'jeweller' in h):
+                col['jeweller_address'] = i
+            elif 'status' in h:
+                col['status'] = i
+        if 'jeweller_address' not in col and 'jeweller_name' not in col:
+            for i, raw in enumerate(header_texts):
+                h = (raw or '').strip().lower()
+                if 'jeweller' in h:
+                    col['jeweller_name'] = i
+                    break
+        return col
+
+    def _normalize_portal_href(self, href):
+        """Turn relative / javascript-free portal paths into full URLs."""
+        if not href:
+            return None
+        href = href.strip()
+        if not href or href == '#' or href.lower().startswith('javascript:'):
+            return None
+        if href.startswith('/'):
+            return portal_config.build_portal_url(href)
+        return href
+
+    def _url_from_onclick_or_data_attrs(self, el):
+        """Extract acknowledge URL from onclick / data-* when href is # or javascript."""
+        import re
+        chunks = []
+        for attr in ('onclick', 'data-url', 'data-href', 'ng-click'):
+            try:
+                val = el.get_attribute(attr)
+                if val:
+                    chunks.append(val)
+            except Exception:
+                pass
+        combined = ' '.join(chunks)
+        if not combined:
+            return None
+        patterns = [
+            r"['\"]([^'\"]*AHCReceivingUIDJewellerRequest[^'\"]*)['\"]",
+            r"['\"]([^'\"]*ReceivingUIDJewellerRequest[^'\"]*)['\"]",
+            r"['\"]([^'\"]*(?:ReceivingUID|AHCReceiving)[^'\"]*)['\"]",
+            r"(/MANAK/[^\s'\"<>]+Receiving[^\s'\"<>]*)",
+            r"location\.href\s*=\s*['\"]([^'\"]+)['\"]",
+        ]
+        for pat in patterns:
+            m = re.search(pat, combined, re.I)
+            if m:
+                return self._normalize_portal_href(m.group(1).strip())
+        return None
+
+    def _resolve_acknowledge_url_from_element(self, el):
+        """Resolve a navigable acknowledge URL from a link/button element."""
+        url = self._normalize_portal_href((el.get_attribute('href') or '').strip())
+        if url:
+            return url
+        return self._url_from_onclick_or_data_attrs(el)
+
+    def _portal_driver_for_request_list(self):
+        """Prefer the browser already showing the HMRD received-request list."""
+        marker = 'assayingAH_List'
+        for d in (self.driver, self.reception_driver):
+            if not d:
+                continue
+            try:
+                url = (d.current_url or '').lower()
+                if marker in url and 'hmtype=hmrd' in url:
+                    return d
+            except Exception:
+                continue
+        return self.reception_driver if self.reception_driver else self.driver
+
+    def _get_acknowledge_href_from_row(self, row):
+        """Find acknowledge/receive URL in a list row (text or href patterns)."""
+        link_xpaths = [
+            ".//a[contains(@href,'AHCReceivingUIDJewellerRequest')]",
+            ".//a[contains(@href,'ReceivingUIDJewellerRequest')]",
+            ".//a[contains(translate(normalize-space(.),"
+            "'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'),'acknowledge')]",
+            ".//a[contains(translate(@title,"
+            "'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'),'acknowledge')]",
+            ".//input[contains(translate(@value,"
+            "'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'),'acknowledge')]",
+            ".//button[contains(translate(normalize-space(.),"
+            "'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'),'acknowledge')]",
+        ]
+        for xpath in link_xpaths:
+            try:
+                for el in row.find_elements(By.XPATH, xpath):
+                    url = self._resolve_acknowledge_url_from_element(el)
+                    if url:
+                        return url
+            except Exception:
+                continue
+        try:
+            for el in row.find_elements(By.XPATH, './/a[@href]'):
+                href = (el.get_attribute('href') or '').strip()
+                if 'ReceivingUID' in href or 'eRequestId' in href:
+                    url = self._normalize_portal_href(href)
+                    if url:
+                        return url
+        except Exception:
+            pass
+        try:
+            for el in row.find_elements(By.XPATH, './/*[@onclick]'):
+                url = self._url_from_onclick_or_data_attrs(el)
+                if url:
+                    return url
+        except Exception:
+            pass
+        return None
+
+    def _find_received_requests_table(self, driver):
+        """Locate the hallmarking received-request table (not layout/menu tables)."""
+        best_table = None
+        best_score = -1
+        for table in driver.find_elements(By.TAG_NAME, 'table'):
+            try:
+                text = (table.text or '')[:800].lower()
+                if 'request' not in text:
+                    continue
+                score = 0
+                if 'request no' in text:
+                    score += 3
+                if 'jeweller' in text or 'received request' in text:
+                    score += 2
+                links = table.find_elements(
+                    By.XPATH,
+                    ".//a[contains(@href,'ReceivingUID') or "
+                    "contains(translate(.,'ACKNOWLEDGE','acknowledge'),'acknowledge')]",
+                )
+                score += min(len(links), 5)
+                data_rows = table.find_elements(By.XPATH, './/tbody/tr[td]')
+                if not data_rows:
+                    data_rows = [
+                        r for r in table.find_elements(By.TAG_NAME, 'tr')
+                        if r.find_elements(By.TAG_NAME, 'td')
+                    ]
+                score += min(len(data_rows), 5)
+                if score > best_score:
+                    best_score = score
+                    best_table = table
+            except Exception:
+                continue
+        return best_table
+
+    def _parse_received_requests_from_table(self, table):
+        """Parse rows from received-request list table."""
+        requests = []
+        skipped_no_link = 0
+        skipped_no_req = 0
+
+        header_cells = []
+        thead_rows = table.find_elements(By.XPATH, './/thead/tr')
+        if thead_rows:
+            header_cells = [
+                c.text.strip() for c in
+                thead_rows[0].find_elements(By.XPATH, './th|./td')
+            ]
+        if not header_cells:
+            all_rows = table.find_elements(By.TAG_NAME, 'tr')
+            if all_rows:
+                header_cells = [
+                    c.text.strip() for c in
+                    all_rows[0].find_elements(By.XPATH, './th|./td')
+                ]
+
+        col = self._map_request_list_columns(header_cells)
+        if 'request_no' not in col:
+            col = {
+                'sno': 0, 'request_no': 1, 'request_date': 2,
+                'jeweller_name': 3, 'jeweller_address': 4, 'status': 5,
+            }
+
+        data_rows = table.find_elements(By.XPATH, './/tbody/tr[td]')
+        if not data_rows:
+            data_rows = [
+                r for r in table.find_elements(By.TAG_NAME, 'tr')
+                if r.find_elements(By.TAG_NAME, 'td')
+            ]
+            if data_rows and data_rows[0].find_elements(By.TAG_NAME, 'th'):
+                data_rows = data_rows[1:]
+
+        for row in data_rows:
+            try:
+                cells = row.find_elements(By.TAG_NAME, 'td')
+                if len(cells) < 3:
+                    continue
+
+                def cell_at(key, default_idx):
+                    idx = col.get(key, default_idx)
+                    if idx is None or idx >= len(cells):
+                        return ''
+                    return cells[idx].text.strip()
+
+                request_no = cell_at('request_no', 1)
+                if not request_no or not any(ch.isdigit() for ch in request_no):
+                    continue
+
+                acknowledge_link = self._get_acknowledge_href_from_row(row)
+                if not acknowledge_link:
+                    skipped_no_link += 1
+                    continue
+
+                jeweller_name = cell_at('jeweller_name', 3)
+                jeweller_address = cell_at('jeweller_address', 4)
+                if not jeweller_name and jeweller_address:
+                    jeweller_name = jeweller_address.split('\n')[0].strip()
+                if not jeweller_address and jeweller_name:
+                    jeweller_address = jeweller_name
+
+                requests.append({
+                    's_no': cell_at('sno', 0),
+                    'request_no': request_no,
+                    'request_date': cell_at('request_date', 2),
+                    'jeweller_name': jeweller_name,
+                    'jeweller_address': jeweller_address,
+                    'status': cell_at('status', 5),
+                    'acknowledge_url': acknowledge_link,
+                })
+            except Exception:
+                continue
+
+        if skipped_no_link or skipped_no_req:
+            self.log(
+                f"ℹ️ Parsed {len(requests)} rows "
+                f"(skipped {skipped_no_link} without action link)",
+                'acknowledge',
+            )
+        return requests
+
     def fetch_request_list(self):
         """Fetch request list from MANAK portal"""
         # Check license before API operations
         if not self.check_license_before_action("request list fetching"):
             return
             
-        if not self.driver or not self.logged_in:
-            messagebox.showwarning("Not Ready", "Please open browser and login first")
-            return
+        # Dual Browser Logic
+        if not self.reception_driver and (not self.driver or not self.logged_in):
+             messagebox.showwarning("Not Ready", "Please open browser (QM or Reception) and login first")
+             return
             
         self.log("🔍 Fetching request list...", 'acknowledge')
         threading.Thread(target=self._fetch_request_list_worker, daemon=True).start()
         
     def _fetch_request_list_worker(self):
-        """Worker thread for fetching request list"""
+        """Worker thread for fetching request list (with pagination)."""
         loading_dialog = None
         try:
-            loading_dialog = LoadingDialog(self.root, "Fetching Requests", "Loading request list from MANAK portal...")
-            
-            # Navigate to request list page
-            loading_dialog.update_status("Navigating to request list page...")
-            request_list_url = "https://huid.manakonline.in/MANAK/assayingAH_List?hmType=HMRD"
-            self.driver.get(request_list_url)
-            time.sleep(1)  # Reduced from 3 to 1 second
-            
-            # Wait for page to load
-            loading_dialog.update_status("Waiting for page to load...")
-            WebDriverWait(self.driver, 15).until(
+            driver = self._portal_driver_for_request_list()
+            if not driver:
+                self.log("❌ No active browser found", 'acknowledge')
+                return
+
+            loading_dialog = LoadingDialog(
+                self.root, "Fetching Requests", "Loading request list from MANAK portal..."
+            )
+
+            request_list_url = portal_config.build_portal_url("/MANAK/assayingAH_List?hmType=HMRD")
+            current_url = ''
+            try:
+                current_url = (driver.current_url or '').lower()
+            except Exception:
+                pass
+            if 'assayingah_list' not in current_url or 'hmtype=hmrd' not in current_url:
+                loading_dialog.update_status("Navigating to request list page...")
+                driver.get(request_list_url)
+            else:
+                loading_dialog.update_status("Using open request list page...")
+
+            loading_dialog.update_status("Waiting for request table...")
+            WebDriverWait(driver, 20).until(
                 EC.presence_of_element_located((By.TAG_NAME, "table"))
             )
-            
-            # Find the request table
-            loading_dialog.update_status("Parsing request table...")
-            tables = self.driver.find_elements(By.TAG_NAME, "table")
-            request_table = None
-            
-            for table in tables:
-                try:
-                    # Look for table with request data
-                    rows = table.find_elements(By.TAG_NAME, "tr")
-                    if len(rows) > 1:  # Has data rows
-                        first_row = rows[1]  # First data row
-                        cells = first_row.find_elements(By.TAG_NAME, "td")
-                        if len(cells) >= 6:  # Has enough columns
-                            # Check if first cell contains a number (S.No.)
-                            if cells[0].text.strip().replace('.', '').isdigit():
-                                request_table = table
-                                break
-                except:
-                    continue
-            
-            if not request_table:
-                raise Exception("Request table not found")
-            
-            # Parse table data
-            loading_dialog.update_status("Extracting request data...")
-            rows = request_table.find_elements(By.TAG_NAME, "tr")
-            requests = []
-            
-            for i, row in enumerate(rows[1:], 1):  # Skip header row
-                try:
-                    cells = row.find_elements(By.TAG_NAME, "td")
-                    if len(cells) >= 7:
-                        s_no = cells[0].text.strip()
-                        request_no = cells[1].text.strip()
-                        request_date = cells[2].text.strip()
-                        jeweller_name = cells[3].text.strip()
-                        jeweller_address = cells[4].text.strip()
-                        status = cells[5].text.strip()
-                        
-                        # Find acknowledge link
-                        acknowledge_link = None
-                        try:
-                            link_element = row.find_element(By.XPATH, ".//a[contains(text(), 'Acknowledge')]")
-                            acknowledge_link = link_element.get_attribute('href')
-                        except:
-                            pass
-                        
-                        if request_no and acknowledge_link:
-                            requests.append({
-                                's_no': s_no,
-                                'request_no': request_no,
-                                'request_date': request_date,
-                                'jeweller_name': jeweller_name,
-                                'jeweller_address': jeweller_address,
-                                'status': status,
-                                'acknowledge_url': acknowledge_link
-                            })
-                            
-                except Exception as e:
-                    self.log(f"⚠️ Error parsing row {i}: {str(e)}", 'acknowledge')
-                    continue
-            
-            # Update UI with request data
+            try:
+                WebDriverWait(driver, 15).until(
+                    EC.presence_of_element_located((
+                        By.XPATH,
+                        "//table[.//*[contains(text(),'Request No') or contains(text(),'Request No.')]]"
+                        "//tr[td]",
+                    ))
+                )
+            except Exception:
+                pass
+            try:
+                WebDriverWait(driver, 15).until(
+                    EC.presence_of_element_located((
+                        By.XPATH,
+                        "//table//a[contains(translate(normalize-space(.),"
+                        "'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'),'acknowledge')]",
+                    ))
+                )
+            except Exception:
+                pass
+            time.sleep(1.5)
+
+            all_requests = []
+            current_page = 1
+            max_pages = 20
+
+            while current_page <= max_pages:
+                loading_dialog.update_status(f"Parsing page {current_page}...")
+                self.log(f"📄 Processing list page {current_page}...", 'acknowledge')
+
+                request_table = self._find_received_requests_table(driver)
+                if not request_table:
+                    if current_page == 1:
+                        raise Exception(
+                            "Request table not found — ensure you are logged in and on "
+                            "'List of Received Request - Hallmarking'"
+                        )
+                    break
+
+                page_requests = self._parse_received_requests_from_table(request_table)
+                for req in page_requests:
+                    jeweller_state = ''
+                    jeweller_info = self._lookup_jeweller_by_name(req.get('jeweller_name', ''))
+                    if jeweller_info:
+                        jeweller_state = (
+                            jeweller_info.get('State') or jeweller_info.get('state') or ''
+                        )
+                    if not jeweller_state:
+                        jeweller_state = self._infer_state_from_address(
+                            req.get('jeweller_address', '')
+                        )
+                    req['jeweller_state'] = jeweller_state
+
+                all_requests.extend(page_requests)
+                self.log(
+                    f"✅ Page {current_page}: {len(page_requests)} requests "
+                    f"(total {len(all_requests)})",
+                    'acknowledge',
+                )
+
+                next_button = None
+                for xpath in (
+                    "//a[contains(text(),'Next') or contains(text(),'next') or contains(text(),'»')]",
+                    "//a[contains(@class,'next')]",
+                    f"//a[normalize-space(text())='{current_page + 1}']",
+                ):
+                    try:
+                        next_button = driver.find_element(By.XPATH, xpath)
+                        if next_button.is_displayed():
+                            break
+                        next_button = None
+                    except Exception:
+                        continue
+
+                if next_button and next_button.is_enabled():
+                    btn_class = (next_button.get_attribute('class') or '').lower()
+                    if 'disabled' not in btn_class:
+                        next_button.click()
+                        time.sleep(1.5)
+                        current_page += 1
+                        continue
+                break
+
+            requests = all_requests
             self.root.after(0, self._update_request_list_ui, requests)
-            
+
             loading_dialog.update_status("Done!")
             loading_dialog.update_message(f"Found {len(requests)} requests")
-            time.sleep(1)
+            time.sleep(0.5)
             loading_dialog.close()
-            
+
             if requests:
-                self.log(f"✅ Successfully fetched {len(requests)} requests", 'acknowledge')
-                messagebox.showinfo("Success", f"✅ Found {len(requests)} requests to acknowledge!")
+                self.log(
+                    f"✅ Successfully fetched {len(requests)} requests from {current_page} page(s)",
+                    'acknowledge',
+                )
+                messagebox.showinfo(
+                    "Success",
+                    f"✅ Found {len(requests)} requests to acknowledge!",
+                )
             else:
                 self.log("⚠️ No requests found to acknowledge", 'acknowledge')
-                messagebox.showwarning("No Requests", "No requests found to acknowledge")
-                
+                messagebox.showwarning(
+                    "No Requests",
+                    "No requests found to acknowledge.\n\n"
+                    "The page may use a different action link — stay on the list page "
+                    "after login, then try Fetch again.",
+                )
+
         except Exception as e:
             if loading_dialog:
                 loading_dialog.close()
@@ -3516,26 +4988,34 @@ class ManakDesktopApp:
         
         self.request_data = requests
         
-        # Add requests to treeview
+        # Add requests to treeview with Tag Prefix lookup
         for request in requests:
+            # Determine initial tag prefix
+            tag_prefix = ""
+            if getattr(self, 'tag_manager', None):
+                tag_prefix = self.tag_manager.get_prefix(request['jeweller_name']) or ""
+            
+            # Store in request object so we can use/edit it
+            request['tag_prefix'] = tag_prefix
+            
             self.request_tree.insert('', 'end', values=(
                 request['s_no'],
                 request['request_no'],
-                request['request_date'],
                 request['jeweller_name'],
                 request['jeweller_address'],
+                tag_prefix,
                 request['status'],
-                "🔄 Acknowledge"
+                "🔄 Ack"
             ))
         
-        # Update status labels
+        # Update status (Compact)
         total = len(requests)
         pending = len([r for r in requests if r['status'] == 'New Request'])
         completed = total - pending
         
-        self.total_requests_label.config(text=f"Total Requests: {total}")
-        self.pending_requests_label.config(text=f"Pending: {pending}")
-        self.completed_requests_label.config(text=f"Completed: {completed}")
+        status_text = f"Total: {total} | Pending: {pending} | Completed: {completed}"
+        if hasattr(self, 'status_var'):
+             self.status_var.set(status_text)
         
         # Enable auto acknowledge button if there are pending requests
         if pending > 0:
@@ -3551,9 +5031,9 @@ class ManakDesktopApp:
         self.request_data = []
         
         # Reset status labels
-        self.total_requests_label.config(text="Total Requests: 0")
-        self.pending_requests_label.config(text="Pending: 0")
-        self.completed_requests_label.config(text="Completed: 0")
+        # Reset status labels
+        if hasattr(self, 'status_var'):
+             self.status_var.set("Ready")
         
         # Disable auto acknowledge button
         self.auto_acknowledge_all_btn.config(state='disabled')
@@ -3675,26 +5155,510 @@ class ManakDesktopApp:
             self.log(f"❌ Error acknowledging request {request['request_no']}: {str(e)}", 'acknowledge')
             messagebox.showerror("Error", f"Error acknowledging request: {str(e)}")
             
-    def _acknowledge_single_request_internal(self, request):
-        """Internal method to acknowledge a single request"""
+    def _lookup_jeweller_by_name(self, jeweller_name):
+        """Match jeweller from HallmarkPro API by name (for State, licence, etc.)."""
+        if not jeweller_name or not hasattr(self, 'jeweller_api_url_var'):
+            return None
         try:
-            # Step 1: Open acknowledge page
-            self.log(f"🔗 Opening acknowledge page for request {request['request_no']}", 'acknowledge')
-            self.driver.get(request['acknowledge_url'])
+            import requests
+            url = self.jeweller_api_url_var.get().strip()
+            if not url:
+                return None
+            firm_id = 2
+            if hasattr(self, 'license_manager') and self.license_manager:
+                try:
+                    firm_id = int(getattr(self.license_manager, 'firm_id', 2) or 2)
+                except (TypeError, ValueError):
+                    pass
+            sep = '&' if '?' in url else '?'
+            url = f"{url}{sep}firm_id={firm_id}"
+            resp = requests.get(url, timeout=15)
+            if resp.status_code != 200:
+                return None
+            data = resp.json()
+            items = data if isinstance(data, list) else data.get('data', data.get('jewellers', []))
+            target = jeweller_name.strip().upper()
+            for j in items:
+                name = str(j.get('Jewellers_Name', j.get('name', ''))).strip().upper()
+                if name == target or target in name or name in target:
+                    return j
+        except Exception as e:
+            self.log(f"⚠️ Jeweller lookup failed: {e}", 'acknowledge')
+        return None
+
+    def _infer_state_from_address(self, address):
+        """Infer Indian state from address text or pincode when State column is missing."""
+        if not address:
+            return ''
+        addr = address.upper()
+        pincode_map = {
+            '110': 'Delhi', '111': 'Delhi', '112': 'Delhi', '113': 'Delhi',
+            '400': 'Maharashtra', '401': 'Maharashtra', '410': 'Maharashtra',
+            '560': 'Karnataka', '561': 'Karnataka',
+            '600': 'Tamil Nadu', '601': 'Tamil Nadu',
+            '700': 'West Bengal', '711': 'West Bengal',
+        }
+        import re
+        m = re.search(r'\b(\d{6})\b', address)
+        if m:
+            prefix = m.group(1)[:3]
+            if prefix in pincode_map:
+                return pincode_map[prefix]
+        state_keywords = [
+            ('DELHI', 'Delhi'), ('MUMBAI', 'Maharashtra'), ('MAHARASHTRA', 'Maharashtra'),
+            ('KARNATAKA', 'Karnataka'), ('TAMIL NADU', 'Tamil Nadu'), ('WEST BENGAL', 'West Bengal'),
+            ('GUJARAT', 'Gujarat'), ('RAJASTHAN', 'Rajasthan'), ('UTTAR PRADESH', 'Uttar Pradesh'),
+            ('HARYANA', 'Haryana'), ('PUNJAB', 'Punjab'),
+        ]
+        for key, state in state_keywords:
+            if key in addr:
+                return state
+        return ''
+
+    def _map_acknowledge_table_columns(self, header_texts):
+        """Map column index by header labels (Live + UAT layouts)."""
+        col = {}
+        for i, raw in enumerate(header_texts):
+            h = (raw or '').strip().lower().replace('\n', ' ')
+            if (
+                'item' in h and 'category' in h
+                and 'weight' not in h and 'observed' not in h
+            ):
+                col['category'] = i
+            elif (
+                h in ('quantity', 'qty')
+                or (h.startswith('quantity') and 'received' not in h and 'ahc' not in h)
+            ):
+                if 'qty' not in col:
+                    col['qty'] = i
+            elif 'received' in h and 'quantity' in h:
+                col['rec_qty'] = i
+            elif 'declared purity' in h or (h == 'purity' or h.endswith(' purity')):
+                col['purity'] = i
+            elif 'observed' in h and 'weight' in h:
+                col['observed_weight'] = i
+            elif 'total weight' in h and 'article' in h:
+                col['declared_weight'] = i
+            elif h == 'accept' or ('accept' in h and 'checkbox' not in h):
+                col['accept'] = i
+        if 'observed_weight' in col:
+            col['weight'] = col['observed_weight']
+        elif 'declared_weight' in col:
+            col['weight'] = col['declared_weight']
+        return col
+
+    def _portal_set_input_value(self, driver, element, value):
+        """Set an input value and fire events so portal jQuery handlers run."""
+        driver.execute_script(
+            """
+            var el = arguments[0], val = arguments[1];
+            el.value = val;
+            el.dispatchEvent(new Event('input', {bubbles: true}));
+            el.dispatchEvent(new Event('change', {bubbles: true}));
+            el.dispatchEvent(new KeyboardEvent('keyup', {bubbles: true}));
+            if (window.jQuery) { jQuery(el).val(val).trigger('keyup').trigger('change'); }
+            """,
+            element,
+            str(value),
+        )
+
+    def _sync_observed_net_totals(self, driver):
+        """Run portal calculateSum / calculateSumQuantity (updates readonly net fields)."""
+        driver.execute_script(
+            """
+            if (typeof calculateSum === 'function') { calculateSum(); }
+            else {
+                var sum = 0;
+                document.querySelectorAll('.totItemCatgWeight').forEach(function(el) {
+                    var v = parseFloat(el.value);
+                    if (!isNaN(v) && el.value.length) sum += v;
+                });
+                var ow = document.getElementById('observed_weight_ahc');
+                if (ow) ow.value = sum.toFixed(3);
+                if (window.jQuery && jQuery('#observed_weight_ahc').length) {
+                    jQuery('#observed_weight_ahc').val(sum.toFixed(3)).trigger('change');
+                }
+            }
+            if (typeof calculateSumQuantity === 'function') { calculateSumQuantity(); }
+            else {
+                var qsum = 0;
+                document.querySelectorAll('.numquantity,.recquantity').forEach(function(el) {
+                    var v = parseFloat(el.value);
+                    if (!isNaN(v) && el.value.length) qsum += v;
+                });
+                var tq = document.getElementById('total_net_quantity');
+                if (tq) tq.value = qsum;
+                if (window.jQuery && jQuery('#total_net_quantity').length) {
+                    jQuery('#total_net_quantity').val(qsum).trigger('change');
+                }
+            }
+            """
+        )
+
+    def _cell_text_or_input(self, cell):
+        """Read visible text or input value from a table cell."""
+        try:
+            inputs = cell.find_elements(By.TAG_NAME, 'input')
+            for inp in inputs:
+                val = (inp.get_attribute('value') or '').strip()
+                if val:
+                    return val
+        except Exception:
+            pass
+        return (cell.text or '').strip().split('\n')[0].strip()
+
+    def _cell_visible_label(self, cell):
+        """Prefer human-readable cell text (e.g. Earings, 22K916), not hidden codes."""
+        text = (cell.text or '').strip()
+        for line in (ln.strip() for ln in text.split('\n') if ln.strip()):
+            if not self._looks_like_numeric_code(line):
+                return line
+        try:
+            for inp in cell.find_elements(By.TAG_NAME, 'input'):
+                cls = (inp.get_attribute('class') or '').lower()
+                if 'hide' in cls or 'hidden' in cls:
+                    continue
+                val = (inp.get_attribute('value') or '').strip()
+                if val and not self._looks_like_numeric_code(val):
+                    return val
+        except Exception:
+            pass
+        return text.split('\n')[0].strip() if text else ''
+
+    @staticmethod
+    def _looks_like_numeric_code(value):
+        """True for weights and internal ids (10.35, 1003), not item names."""
+        s = (value or '').strip()
+        if not s:
+            return True
+        try:
+            float(s.replace(',', ''))
+            return True
+        except ValueError:
+            pass
+        return s.isdigit()
+
+    def _find_acknowledge_declaration_table(self, driver):
+        """Pick the item-declaration table with the most data rows (multi-item requests)."""
+        xpath = (
+            "//table[.//th[contains(translate(., "
+            "'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'), 'item category')]]"
+        )
+        best_table = None
+        best_headers = []
+        best_col = {}
+        best_rows = []
+        for table in driver.find_elements(By.XPATH, xpath):
+            try:
+                headers = [th.text.strip() for th in table.find_elements(By.XPATH, './/th')]
+                if not any('item category' in (h or '').lower() for h in headers):
+                    continue
+                col = self._map_acknowledge_table_columns(headers)
+                if 'category' not in col:
+                    continue
+                rows = self._declaration_table_data_rows(table)
+                if len(rows) > len(best_rows):
+                    best_table = table
+                    best_headers = headers
+                    best_col = col
+                    best_rows = rows
+            except Exception:
+                continue
+        return best_table, best_headers, best_col, best_rows
+
+    def _declaration_table_data_rows(self, table):
+        """All visible data rows in the declaration table."""
+        rows = table.find_elements(By.XPATH, './/tbody/tr[td]')
+        if not rows:
+            rows = [
+                r for r in table.find_elements(By.TAG_NAME, 'tr')
+                if r.find_elements(By.TAG_NAME, 'td')
+            ]
+            if rows and rows[0].find_elements(By.TAG_NAME, 'th'):
+                rows = rows[1:]
+        return [r for r in rows if r.is_displayed()]
+
+    def _row_weight_from_cells(self, cells, col, header_weight, header_pcs, row_qty):
+        """Weight from observed input, else declared article weight, else header split."""
+        for key in ('observed_weight', 'declared_weight', 'weight'):
+            idx = col.get(key)
+            if idx is None or idx >= len(cells):
+                continue
+            wt_text = self._cell_text_or_input(cells[idx])
+            try:
+                w = float(wt_text) if wt_text else 0.0
+            except (ValueError, TypeError):
+                w = 0.0
+            if w > 0:
+                return w
+        if row_qty > 0 and header_weight and header_pcs:
+            try:
+                hw = float(header_weight)
+                hp = int(header_pcs)
+                if hp > 0 and hw > 0:
+                    return round((hw / hp) * row_qty, 3)
+            except (ValueError, TypeError):
+                pass
+        return 0.0
+
+    def _log_job_row_debug(self, index, job, total):
+        """Log one extracted row before DB save (debug)."""
+        self.log(
+            f"  📋 Row {index}/{total}: item={job.get('item')!r} | "
+            f"pcs={job.get('pcs')} | weight={job.get('weight')}g | "
+            f"purity={job.get('purity')!r} | licence={job.get('licence_no')} | "
+            f"req={job.get('request_no')}",
+            'acknowledge',
+        )
+
+    def _save_acknowledge_jobs_batch(self, jobs_to_save, request_no):
+        """Save every extracted item row to the API with debug logging."""
+        jobs_with_data = [
+            j for j in jobs_to_save
+            if (j.get('pcs', 0) or 0) > 0 or (float(j.get('weight', 0) or 0)) > 0
+        ]
+        skipped = len(jobs_to_save) - len(jobs_with_data)
+        if skipped > 0:
+            self.log(
+                f"ℹ️ Skipped {skipped} empty row(s) (pcs=0 and weight=0)",
+                'acknowledge',
+            )
+        if not jobs_with_data:
+            self.log("⚠️ No job rows to save to database", 'acknowledge')
+            return
+        self.log(
+            f"💾 Saving {len(jobs_with_data)} item row(s) for Request #{request_no} to database...",
+            'acknowledge',
+        )
+        multi = len(jobs_with_data) > 1
+        if multi and self._try_save_jobs_batch(jobs_with_data, request_no):
+            return
+        for i, job in enumerate(jobs_with_data, 1):
+            self._log_job_row_debug(i, job, len(jobs_with_data))
+            self._save_job_via_api(job)
+            time.sleep(0.15)
+
+    def _extract_acknowledge_jobs_from_table(self, driver, request, header_weight, header_pcs, header_purity, cml_no):
+        """Extract per-row jobs from acknowledge page table (all items)."""
+        jobs = []
+        item_types_list = []
+        try:
+            table, headers, col, rows = self._find_acknowledge_declaration_table(driver)
+            if not table or 'category' not in col:
+                self.log("⚠️ Item declaration table not found", 'acknowledge')
+                return jobs, item_types_list
+
+            self.log(
+                f"📊 Table headers: {headers}",
+                'acknowledge',
+            )
+            self.log(
+                f"📊 Scanning {len(rows)} data row(s) (columns: {col})",
+                'acknowledge',
+            )
+
+            for row_idx, row in enumerate(rows, 1):
+                try:
+                    cells = row.find_elements(By.TAG_NAME, 'td')
+                    if len(cells) < max(col.values()) + 1:
+                        self.log(
+                            f"⚠️ Row {row_idx}: only {len(cells)} cells, need "
+                            f"{max(col.values()) + 1} — skipped",
+                            'acknowledge',
+                        )
+                        continue
+
+                    cat_text = self._cell_visible_label(cells[col['category']])
+                    if not cat_text or 'category' in cat_text.lower() or 'total' in cat_text.lower():
+                        continue
+                    if self._looks_like_numeric_code(cat_text):
+                        self.log(
+                            f"⚠️ Row {row_idx}: item looks like weight/code: {cat_text!r} — skipped",
+                            'acknowledge',
+                        )
+                        continue
+
+                    qty_text = self._cell_text_or_input(cells[col['qty']]) if 'qty' in col else '0'
+                    try:
+                        row_qty = int(float(qty_text)) if qty_text else 0
+                    except (ValueError, TypeError):
+                        row_qty = 0
+
+                    purity_text = ''
+                    if 'purity' in col:
+                        purity_text = self._cell_visible_label(cells[col['purity']])
+
+                    row_weight = self._row_weight_from_cells(
+                        cells, col, header_weight, header_pcs, row_qty
+                    )
+
+                    if row_qty <= 0 and row_weight <= 0:
+                        self.log(
+                            f"⚠️ Row {row_idx} ({cat_text}): no qty/weight — skipped",
+                            'acknowledge',
+                        )
+                        continue
+
+                    job = {
+                        'request_no': request['request_no'],
+                        'job_no': '',
+                        'item': cat_text,
+                        'purity': purity_text or header_purity,
+                        'weight': row_weight,
+                        'pcs': row_qty,
+                        'licence_no': cml_no,
+                        'material_type': 'Gold',
+                        'date_of_request': datetime.now().strftime('%Y-%m-%d'),
+                        'status': 'XRF',
+                        'jeweller_name': request.get('jeweller_name', ''),
+                    }
+                    jobs.append(job)
+                    item_types_list.append(cat_text)
+                    self._log_job_row_debug(len(jobs), job, len(rows))
+                except Exception as row_err:
+                    self.log(f"⚠️ Row {row_idx} parse error: {row_err}", 'acknowledge')
+                    continue
+        except Exception as e:
+            self.log(f"⚠️ Error extracting items: {e}", 'acknowledge')
+        return jobs, item_types_list
+
+    def _fill_uat_article_weights(self, driver):
+        """Fill per-article weight inputs (UAT: itemWeightIndidual / weightCls) from header net weight."""
+        try:
+            total_w = 0.0
+            for field_id in ('netweight', 'numweight'):
+                elems = driver.find_elements(By.ID, field_id)
+                if elems and elems[0].get_attribute('value'):
+                    total_w = float(elems[0].get_attribute('value'))
+                    break
+            if total_w <= 0:
+                return
+            weight_inputs = driver.find_elements(By.CSS_SELECTOR, 'input.weightCls')
+            active = [w for w in weight_inputs if w.is_displayed()]
+            if not active:
+                return
+            per_item = round(total_w / len(active), 3)
+            for inp in active:
+                self._portal_set_input_value(driver, inp, per_item)
+            for inp in driver.find_elements(By.CSS_SELECTOR, 'input.totItemCatgWeight'):
+                try:
+                    if inp.is_displayed() and not (inp.get_attribute('value') or '').strip():
+                        self._portal_set_input_value(driver, inp, per_item)
+                except Exception:
+                    continue
+            self._sync_observed_net_totals(driver)
+            self.log(
+                f"✅ Filled {len(active)} article weight(s) @ {per_item}g each (total {total_w}g)",
+                'acknowledge',
+            )
+        except Exception as e:
+            self.log(f"⚠️ Article weight fill: {e}", 'acknowledge')
+
+    def _check_accept_checkboxes(self, driver):
+        """Check Accept column checkboxes on UAT/live acknowledge page."""
+        checked = 0
+        try:
+            try:
+                select_all = driver.find_element(By.CSS_SELECTOR, 'input.selectall')
+                if select_all.is_displayed() and not select_all.is_selected():
+                    driver.execute_script('arguments[0].click();', select_all)
+                    time.sleep(0.2)
+            except Exception:
+                pass
+            boxes = driver.find_elements(
+                By.XPATH,
+                "//table[.//th[contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'accept')]]"
+                "//input[@type='checkbox']",
+            )
+            for cb in boxes:
+                try:
+                    if cb.is_displayed() and not cb.is_selected():
+                        driver.execute_script("arguments[0].click();", cb)
+                        checked += 1
+                except Exception:
+                    continue
+            if checked:
+                self.log(f"✅ Checked {checked} Accept checkbox(es)", 'acknowledge')
+            return checked > 0
+        except Exception as e:
+            self.log(f"⚠️ Accept checkboxes: {e}", 'acknowledge')
+            return False
+
+    def _click_acknowledge_submit_on_page(self, driver):
+        """Submit acknowledge form (UAT: Submit on same page; Live: may redirect after Add)."""
+        self._check_accept_checkboxes(driver)
+        submit_xpaths = [
+            "//input[@id='save']",
+            "//input[@type='button' and @value='Submit']",
+            "//button[normalize-space()='Submit']",
+            "//input[@type='button' and translate(@value,'submit','SUBMIT')='Submit']",
+            "//input[@type='submit' and translate(@value,'submit','SUBMIT')='Submit']",
+            "//button[contains(translate(.,'submit','SUBMIT'),'Submit')]",
+            "//*[self::button or self::input][contains(translate(@value,'submit','SUBMIT'),'Submit')]",
+        ]
+        for xpath in submit_xpaths:
+            try:
+                btn = WebDriverWait(driver, 3).until(
+                    EC.element_to_be_clickable((By.XPATH, xpath))
+                )
+                driver.execute_script("arguments[0].scrollIntoView({block:'center'});", btn)
+                time.sleep(0.2)
+                try:
+                    btn.click()
+                except Exception:
+                    driver.execute_script("arguments[0].click();", btn)
+                self.log(f"✅ Clicked Submit ({xpath[:50]}...)", 'acknowledge')
+                time.sleep(1.5)
+                try:
+                    alert = driver.switch_to.alert
+                    self.log(f"🔔 Alert: {alert.text}", 'acknowledge')
+                    alert.accept()
+                    time.sleep(0.5)
+                except Exception:
+                    pass
+                return True
+            except Exception:
+                continue
+        return False
+
+    def _acknowledge_single_request_internal(self, request):
+        """Internal logic to acknowledge a single request"""
+        request_no = request['request_no']
+        
+        # Dual Browser Selection
+        driver = self._portal_driver_for_request_list()
+        if not driver:
+            self.log("❌ No active browser found", 'acknowledge')
+            return False
+
+        try:
+            self.log(f"🔄 Processing Request: {request_no}", 'acknowledge')
+            
+            # 1. Open Acknowledge Page
+            # Both browsers now use the same interface, so use the extracted URL
+            if 'acknowledge_url' in request and request['acknowledge_url']:
+                url = request['acknowledge_url']
+                if url.startswith('/'):
+                    url = portal_config.build_portal_url(url)
+            else:
+                self.log(f"❌ No acknowledge URL found for request {request_no}", 'acknowledge')
+                return False
+                
+            driver.get(url)
             time.sleep(2)  # Give page time to load
             
             # Step 2: Wait for page to load and verify we're on the right page
             try:
-                WebDriverWait(self.driver, 15).until(
+                WebDriverWait(driver, 15).until(
                     EC.presence_of_element_located((By.TAG_NAME, "form"))
                 )
                 
                 # Check if we're on the acknowledge page by looking for key elements
-                page_title = self.driver.title
+                page_title = driver.title
                 self.log(f"📄 Page loaded: {page_title}", 'acknowledge')
                 
                 # Check current URL
-                current_url = self.driver.current_url
+                current_url = driver.current_url
                 self.log(f"🔗 Current URL: {current_url}", 'acknowledge')
                 
             except Exception as e:
@@ -3711,7 +5675,7 @@ class ManakDesktopApp:
             tag_id_selected = False
             try:
                 # Method 1: Try by exact ID
-                tag_id_yes_radio = self.driver.find_element(By.ID, "strRadioTag_yes")
+                tag_id_yes_radio = driver.find_element(By.ID, "strRadioTag_yes")
                 if not tag_id_yes_radio.is_selected():
                     tag_id_yes_radio.click()
                     time.sleep(0.3)
@@ -3724,7 +5688,7 @@ class ManakDesktopApp:
                 self.log(f"⚠️ Method 1 failed: {str(e)}", 'acknowledge')
                 try:
                     # Method 2: Try by name and value
-                    tag_id_yes_radio = self.driver.find_element(By.XPATH, "//input[@name='strRadioTag' and @value='Y']")
+                    tag_id_yes_radio = driver.find_element(By.XPATH, "//input[@name='strRadioTag' and @value='Y']")
                     if not tag_id_yes_radio.is_selected():
                         tag_id_yes_radio.click()
                         time.sleep(0.3)
@@ -3737,7 +5701,7 @@ class ManakDesktopApp:
                     self.log(f"⚠️ Method 2 failed: {str(e2)}", 'acknowledge')
                     try:
                         # Method 3: Try by label text
-                        yes_label = self.driver.find_element(By.XPATH, "//label[contains(text(), 'Yes')]//input[@type='radio']")
+                        yes_label = driver.find_element(By.XPATH, "//label[contains(text(), 'Yes')]//input[@type='radio']")
                         if not yes_label.is_selected():
                             yes_label.click()
                             time.sleep(0.3)
@@ -3750,87 +5714,201 @@ class ManakDesktopApp:
                         self.log(f"⚠️ Could not select Generate Tag ID (all methods failed)", 'acknowledge')
                         self.log("ℹ️ This field may be optional or page structure has changed", 'acknowledge')
             
+            # Fill Tag Prefix if configured
+            # Determine prefix from request object (updated via table edit)
+            tag_prefix = request.get('tag_prefix', '')
+            
+            # Fallback to mapping if missing (safety check)
+            if not tag_prefix and getattr(self, 'tag_manager', None):
+                 tag_prefix = self.tag_manager.get_prefix(request.get('jeweller_name', '')) or ""
+
+            if tag_prefix:
+                try:
+                    # Wait for field to be enabled
+                    try:
+                        WebDriverWait(driver, 3).until(
+                            lambda d: d.find_element(By.ID, "str_tag_pattern").is_enabled()
+                        )
+                    except:
+                        pass
+
+                    tag_prefix_field = driver.find_element(By.ID, "str_tag_pattern")
+                    
+                    if tag_prefix_field.is_displayed():
+                        # Force enable if needed (JS)
+                        driver.execute_script("arguments[0].removeAttribute('disabled');", tag_prefix_field)
+                        driver.execute_script("arguments[0].removeAttribute('readonly');", tag_prefix_field)
+                        
+                        tag_prefix_field.clear()
+                        tag_prefix_field.send_keys(tag_prefix)
+                        
+                        # Ensure value is set
+                        driver.execute_script("arguments[0].value = arguments[1];", tag_prefix_field, tag_prefix)
+                        self.log(f"✅ Filled Tag Prefix: {tag_prefix}", 'acknowledge')
+                    else:
+                        self.log("⚠️ Tag Prefix field found but not displayed", 'acknowledge')
+                except Exception as e:
+                    self.log(f"⚠️ Could not fill Tag Prefix: {str(e)}", 'acknowledge')
+            
             # Auto-fill quantity and weight if enabled
             if self.auto_fill_qty_weight_var.get():
-                self._auto_fill_quantity_and_weight()
+                self._auto_fill_quantity_and_weight(driver)
             else:
                 self.log("ℹ️ Auto-fill quantity/weight is disabled", 'acknowledge')
             
             # Skip filling AHC Receiving Remarks - not needed
             self.log("ℹ️ Skipping AHC Receiving Remarks (not required)", 'acknowledge')
             
-            # Step 4: Click Add button - Try multiple methods
-            add_button_clicked = False
-            
-            # Method 1: Standard Add button
+            # --- NEW: Extract Data and Save Job Card (BEFORE ADD CLICK) ---
             try:
-                add_button = self.driver.find_element(By.XPATH, "//input[@type='button' and @value='Add']")
+                self.log("📊 Extracting request details...", 'acknowledge')
+                
+                # Extract Data using Hidden Inputs (Most Reliable)
+                jeweller_name = "Unknown"
+                item_type = ""
+                purity = ""
+                weight = 0.0
+                pcs = 0
+                request_no = request['request_no'] # Default to what we have
+                
+                try:
+                    # 1. Jeweller Name (str_outlet_name or separate field)
+                    elem = driver.find_elements(By.ID, "str_outlet_name")
+                    if elem: jeweller_name = elem[0].get_attribute("value")
+                    else:
+                        # Fallback to Jeweller Name Span
+                        elem = driver.find_elements(By.XPATH, "//span[contains(text(), 'Jeweller Name')]/following::span[1]")
+                        if elem: jeweller_name = elem[0].text.strip()
+                        
+                    # 2. Total Weight (netweight or numweight)
+                    elem = driver.find_elements(By.ID, "netweight")
+                    if elem: 
+                        attr_val = elem[0].get_attribute("value")
+                        weight = float(attr_val) if attr_val else 0
+                    else:
+                        elem = driver.find_elements(By.ID, "numweight")
+                        if elem:
+                            attr_val = elem[0].get_attribute("value")
+                            weight = float(attr_val) if attr_val else 0
+                            
+                    # 3. Request No (num_request_no)
+                    elem = driver.find_elements(By.ID, "num_request_no")
+                    if elem: request_no = elem[0].get_attribute("value")
+
+                    # 4. Total Quantity (totQuantityjew or from table)
+                    elem = driver.find_elements(By.ID, "totQuantityjew")
+                    if elem:
+                        attr_val = elem[0].get_attribute("value")
+                        pcs = int(attr_val) if attr_val else 0
+                    
+                    # 5. CML No / License No (str_cml_no)
+                    cml_no = ""
+                    elem = driver.find_elements(By.ID, "str_cml_no")
+                    if elem: cml_no = elem[0].get_attribute("value")
+                    
+                    # 6. Item rows (UAT + live table layouts)
+                    jobs_to_save = []
+                    item_types_list = []
+                    jobs_to_save, item_types_list = self._extract_acknowledge_jobs_from_table(
+                        driver,
+                        request,
+                        str(weight) if weight else '',
+                        pcs,
+                        purity,
+                        cml_no,
+                    )
+                    if item_types_list:
+                        item_type = ', '.join(item_types_list)
+                        self.log(f"✅ Extracted {len(jobs_to_save)} Items: {item_type}", 'acknowledge')
+
+                    # Final consolidated logging
+                    self.log(f"✅ Extracted Header: {jeweller_name} | Total: {pcs} pcs | {weight}g | Lic: {cml_no}", 'acknowledge')
+                    
+                    if not jobs_to_save:
+                        self.log("⚠️ No table rows extracted, using header totals", 'acknowledge')
+                        jobs_to_save.append({
+                            'request_no': request_no,
+                            'job_no': '',
+                            'item': item_type if item_type else 'Gold Jewellery',
+                            'purity': purity,
+                            'weight': weight,
+                            'pcs': pcs if pcs else 1,
+                            'licence_no': cml_no,
+                            'material_type': 'Gold',
+                            'date_of_request': datetime.now().strftime('%Y-%m-%d'),
+                            'status': 'XRF',
+                            'jeweller_name': request.get('jeweller_name', jeweller_name),
+                        })
+                    else:
+                        for job in jobs_to_save:
+                            if not job.get('jeweller_name'):
+                                job['jeweller_name'] = request.get('jeweller_name', jeweller_name)
+
+                except Exception as e:
+                    self.log(f"col⚠️ Error using hidden fields: {e}", 'acknowledge')
+
+                if hasattr(self, 'save_job_api_url_var') and getattr(
+                    self, 'save_job_data_var', tk.BooleanVar(value=True)
+                ).get():
+                    self._save_acknowledge_jobs_batch(
+                        jobs_to_save,
+                        request.get('request_no', request_no),
+                    )
+
+            except Exception as e:
+                 self.log(f"❌ Error during data extraction: {e}", 'acknowledge')
+
+            # Step 4: Live portal uses Add; UAT/demo submits on same page
+            add_button_clicked = False
+            try:
+                add_button = driver.find_element(By.XPATH, "//input[@type='button' and @value='Add']")
                 if add_button.is_displayed() and add_button.is_enabled():
                     add_button.click()
-                    self.log("✅ Clicked Add button (Method 1)", 'acknowledge')
+                    self.log("✅ Clicked Add button", 'acknowledge')
                     time.sleep(1.5)
                     add_button_clicked = True
-                else:
-                    self.log("⚠️ Add button found but not interactable", 'acknowledge')
             except Exception as e:
-                self.log(f"⚠️ Add button Method 1 failed: {str(e)}", 'acknowledge')
-            
-            # Method 2: Try button tag
+                self.log(f"ℹ️ Add button not found (UAT uses Submit on same page): {e}", 'acknowledge')
+
             if not add_button_clicked:
-                try:
-                    add_button = self.driver.find_element(By.XPATH, "//button[contains(text(), 'Add')]")
-                    if add_button.is_displayed() and add_button.is_enabled():
-                        add_button.click()
-                        self.log("✅ Clicked Add button (Method 2)", 'acknowledge')
-                        time.sleep(1.5)
-                        add_button_clicked = True
-                except Exception as e:
-                    self.log(f"⚠️ Add button Method 2 failed: {str(e)}", 'acknowledge')
-            
-            # Method 3: Try submit button
-            if not add_button_clicked:
-                try:
-                    submit_button = self.driver.find_element(By.XPATH, "//input[@type='submit']")
-                    if submit_button.is_displayed() and submit_button.is_enabled():
-                        submit_button.click()
-                        self.log("✅ Clicked Submit button (Method 3)", 'acknowledge')
-                        time.sleep(1.5)
-                        add_button_clicked = True
-                except Exception as e:
-                    self.log(f"⚠️ Submit button Method 3 failed: {str(e)}", 'acknowledge')
-            
-            if not add_button_clicked:
-                self.log("❌ Could not find or click Add/Submit button", 'acknowledge')
-                self.log("📸 Saving page source for debugging...", 'acknowledge')
-                try:
-                    # Save page source to help debug
-                    page_source = self.driver.page_source
-                    debug_file = f"debug_acknowledge_{request['request_no']}.html"
-                    with open(debug_file, 'w', encoding='utf-8') as f:
-                        f.write(page_source)
-                    self.log(f"💾 Page source saved to {debug_file}", 'acknowledge')
-                except:
-                    pass
-                return False
-            
-            # Step 5: Handle the redirect and accept all items
-            current_url = self.driver.current_url
+                self.log("🔄 Submitting acknowledge on current page...", 'acknowledge')
+                if self._click_acknowledge_submit_on_page(driver):
+                    time.sleep(2)
+                    if 'message=' not in driver.current_url:
+                        self.log("✅ Acknowledge submitted on portal", 'acknowledge')
+                        return True
+                else:
+                    self.log("❌ Could not find or click Submit button", 'acknowledge')
+                    try:
+                        debug_file = f"debug_acknowledge_{request['request_no']}.html"
+                        with open(debug_file, 'w', encoding='utf-8') as f:
+                            f.write(driver.page_source)
+                        self.log(f"💾 Page source saved to {debug_file}", 'acknowledge')
+                    except Exception:
+                        pass
+                    return False
+
+            # Step 5: Handle redirect after Add (live portal)
+            current_url = driver.current_url
             if 'message=' in current_url:
                 self.log("🔄 Redirected to accept page, accepting all items...", 'acknowledge')
                 
                 # Wait for page to fully load
-                time.sleep(0.5)  # Reduced from 2 to 0.5 seconds
+                time.sleep(1.0) 
                 
-                # Step 5a: Find and click the "select all" checkbox with multiple methods
                 select_all_clicked = False
                 
-                # Method 1: Try by exact class name and structure
                 try:
-                    select_all_checkbox = self.driver.find_element(By.XPATH, "//th[contains(text(), 'Accept')]//input[@type='checkbox' and contains(@class, 'selectall')]")
+                    WebDriverWait(driver, 3).until(
+                        EC.presence_of_element_located((By.XPATH, "//th[contains(text(), 'Accept')]"))
+                    )
+                    select_all_checkbox = WebDriverWait(driver, 2).until(
+                        EC.presence_of_element_located((By.XPATH, "//th[contains(text(), 'Accept')]//input[@type='checkbox']"))
+                    )
                     if select_all_checkbox.is_displayed():
                         if not select_all_checkbox.is_selected():
                             select_all_checkbox.click()
-                            time.sleep(0.3)  # Reduced from 1 to 0.3 seconds
+                            time.sleep(0.3)
                             self.log("✅ Clicked 'Select All' checkbox in Accept header (Method 1)", 'acknowledge')
                             select_all_clicked = True
                         else:
@@ -3839,16 +5917,12 @@ class ManakDesktopApp:
                 except Exception as e:
                     self.log(f"⚠️ Method 1 failed: {str(e)}", 'acknowledge')
                 
-                # Method 2: Try by finding checkbox in Accept column header
                 if not select_all_clicked:
                     try:
-                        # Find table with Accept column
-                        tables = self.driver.find_elements(By.TAG_NAME, "table")
+                        tables = driver.find_elements(By.TAG_NAME, "table")
                         for table in tables:
                             try:
-                                # Look for Accept column header
                                 accept_header = table.find_element(By.XPATH, ".//th[contains(text(), 'Accept')]")
-                                # Find checkbox in the same row or nearby
                                 select_all_checkbox = accept_header.find_element(By.XPATH, ".//input[@type='checkbox']")
                                 if select_all_checkbox.is_displayed():
                                     if not select_all_checkbox.is_selected():
@@ -3862,10 +5936,9 @@ class ManakDesktopApp:
                     except Exception as e:
                         self.log(f"⚠️ Method 2 failed: {str(e)}", 'acknowledge')
                 
-                # Method 3: Try by finding first checkbox in table
                 if not select_all_clicked:
                     try:
-                        select_all_checkbox = self.driver.find_element(By.XPATH, "//table//input[@type='checkbox'][1]")
+                        select_all_checkbox = driver.find_element(By.XPATH, "//table//input[@type='checkbox'][1]")
                         if select_all_checkbox.is_displayed():
                             if not select_all_checkbox.is_selected():
                                 select_all_checkbox.click()
@@ -3883,7 +5956,7 @@ class ManakDesktopApp:
                 
                 # Method 1: Try by href containing getAHCRceiptJrxmlReportVoucher
                 try:
-                    voucher_link = self.driver.find_element(By.XPATH, "//a[contains(@href, 'getAHCRceiptJrxmlReportVoucher')]")
+                    voucher_link = driver.find_element(By.XPATH, "//a[contains(@href, 'getAHCRceiptJrxmlReportVoucher')]")
                     if voucher_link.is_displayed():
                         voucher_link.click()
                         time.sleep(0.5)  # Reduced from 2 to 0.5 seconds
@@ -3895,7 +5968,7 @@ class ManakDesktopApp:
                 # Method 2: Try by text containing "Voucher Print"
                 if not voucher_clicked:
                     try:
-                        voucher_link = self.driver.find_element(By.XPATH, "//a[contains(text(), 'Voucher Print')]")
+                        voucher_link = driver.find_element(By.XPATH, "//a[contains(text(), 'Voucher Print')]")
                         if voucher_link.is_displayed():
                             voucher_link.click()
                             time.sleep(0.5)  # Reduced from 2 to 0.5 seconds
@@ -3907,7 +5980,7 @@ class ManakDesktopApp:
                 # Method 3: Try by button with Voucher Print text
                 if not voucher_clicked:
                     try:
-                        voucher_button = self.driver.find_element(By.XPATH, "//input[@type='button' and contains(@value, 'Voucher')]")
+                        voucher_button = driver.find_element(By.XPATH, "//input[@type='button' and contains(@value, 'Voucher')]")
                         if voucher_button.is_displayed():
                             voucher_button.click()
                             time.sleep(0.5)  # Reduced from 2 to 0.5 seconds
@@ -3919,7 +5992,7 @@ class ManakDesktopApp:
                 # Method 4: Try by any element containing "Voucher"
                 if not voucher_clicked:
                     try:
-                        voucher_element = self.driver.find_element(By.XPATH, "//*[contains(text(), 'Voucher') and contains(text(), 'Print')]")
+                        voucher_element = driver.find_element(By.XPATH, "//*[contains(text(), 'Voucher') and contains(text(), 'Print')]")
                         if voucher_element.is_displayed():
                             voucher_element.click()
                             time.sleep(0.5)  # Reduced from 2 to 0.5 seconds
@@ -3930,13 +6003,15 @@ class ManakDesktopApp:
                 
                 if not voucher_clicked:
                     self.log("❌ Could not find or click Voucher Print", 'acknowledge')
+                else:
+                    self.log("✅ Clicked Voucher Print - PDF will download in background", 'acknowledge')
                 
                 # Step 7: Click Submit with multiple methods
                 submit_clicked = False
                 
                 # Method 1: Try by value="Submit"
                 try:
-                    submit_button = self.driver.find_element(By.XPATH, "//input[@type='button' and @value='Submit']")
+                    submit_button = driver.find_element(By.XPATH, "//input[@type='button' and @value='Submit']")
                     if submit_button.is_displayed() and submit_button.is_enabled():
                         submit_button.click()
                         time.sleep(0.5)  # Reduced from 2 to 0.5 seconds
@@ -3948,7 +6023,7 @@ class ManakDesktopApp:
                 # Method 2: Try by text containing "Submit"
                 if not submit_clicked:
                     try:
-                        submit_button = self.driver.find_element(By.XPATH, "//button[contains(text(), 'Submit')]")
+                        submit_button = driver.find_element(By.XPATH, "//button[contains(text(), 'Submit')]")
                         if submit_button.is_displayed():
                             submit_button.click()
                             time.sleep(0.5)  # Reduced from 2 to 0.5 seconds
@@ -3960,7 +6035,7 @@ class ManakDesktopApp:
                 # Method 3: Try by any element with Submit text
                 if not submit_clicked:
                     try:
-                        submit_element = self.driver.find_element(By.XPATH, "//*[contains(text(), 'Submit')]")
+                        submit_element = driver.find_element(By.XPATH, "//*[contains(text(), 'Submit')]")
                         if submit_element.is_displayed():
                             submit_element.click()
                             time.sleep(0.5)  # Reduced from 2 to 0.5 seconds
@@ -3975,7 +6050,7 @@ class ManakDesktopApp:
                 
                 # Handle any confirmation dialogs
                 try:
-                    alert = self.driver.switch_to.alert
+                    alert = driver.switch_to.alert
                     alert_text = alert.text
                     self.log(f"🔔 Alert: {alert_text}", 'acknowledge')
                     alert.accept()
@@ -3985,18 +6060,27 @@ class ManakDesktopApp:
                     
                 return True
             else:
-                self.log("⚠️ Expected redirect did not occur", 'acknowledge')
+                self.log("⚠️ Add clicked but redirect did not occur — trying Submit on page", 'acknowledge')
+                if self._click_acknowledge_submit_on_page(driver):
+                    return True
                 return False
                 
         except Exception as e:
             self.log(f"❌ Error in acknowledge workflow: {str(e)}", 'acknowledge')
             return False
             
-    def _auto_fill_quantity_and_weight(self):
-        """Auto-fill quantity and weight from the item declaration table"""
+    def _auto_fill_quantity_and_weight(self, driver=None):
+        """Auto-fill quantity and weight fields from declaration table"""
+        if not driver:
+            driver = self.driver
+        if not driver:
+            return
+
         try:
+            self.log("🔄 Auto-filling quantity and weight...", 'acknowledge')
+            
             # Find the item declaration table
-            tables = self.driver.find_elements(By.TAG_NAME, "table")
+            tables = driver.find_elements(By.TAG_NAME, "table")
             
             for table in tables:
                 try:
@@ -4008,36 +6092,52 @@ class ManakDesktopApp:
                         header_texts = [cell.text.strip() for cell in header_cells]
                         
                         if "Item Category" in header_texts and "Quantity" in header_texts:
-                            # This is the item declaration table
                             self.log("📊 Found item declaration table", 'acknowledge')
-                            
-                            # Process each data row
-                            for row in rows[1:]:  # Skip header
+                            col = self._map_acknowledge_table_columns(header_texts)
+                            filled_count = 0
+                            for row in rows[1:]:
                                 cells = row.find_elements(By.TAG_NAME, "td")
-                                if len(cells) >= 7:
+                                if len(cells) < 4:
+                                    continue
+                                try:
+                                    declared_qty = (
+                                        self._cell_text_or_input(cells[col['qty']])
+                                        if 'qty' in col else ''
+                                    )
+                                    wcol = col.get('declared_weight', col.get('weight'))
+                                    declared_weight = (
+                                        self._cell_text_or_input(cells[wcol])
+                                        if wcol is not None else ''
+                                    )
                                     try:
-                                        # Get declared quantity and weight
-                                        declared_qty = cells[2].text.strip()  # Quantity column
-                                        declared_weight = cells[3].text.strip()  # Weight column
-                                        
-                                        # Fill "Received Quantity by AHC"
-                                        received_qty_field = cells[5].find_element(By.TAG_NAME, "input")
-                                        if received_qty_field.is_displayed() and received_qty_field.is_enabled():
-                                            received_qty_field.clear()
-                                            received_qty_field.send_keys(declared_qty)
-                                        
-                                        # Fill "Observed Item Category Weight"
-                                        observed_weight_field = cells[6].find_element(By.TAG_NAME, "input")
-                                        if observed_weight_field.is_displayed() and observed_weight_field.is_enabled():
-                                            observed_weight_field.clear()
-                                            observed_weight_field.send_keys(declared_weight)
-                                            
-                                        self.log(f"✅ Auto-filled: Qty={declared_qty}, Weight={declared_weight}", 'acknowledge')
-                                        
-                                    except Exception as e:
-                                        self.log(f"⚠️ Error filling row data: {str(e)}", 'acknowledge')
+                                        qty_val = int(float(declared_qty)) if declared_qty else 0
+                                        wt_val = float(declared_weight) if declared_weight else 0
+                                    except (ValueError, TypeError):
+                                        qty_val, wt_val = 0, 0
+                                    if qty_val <= 0 and wt_val <= 0:
                                         continue
-                            
+                                    for cell in cells:
+                                        try:
+                                            for inp in cell.find_elements(By.TAG_NAME, 'input'):
+                                                cls = inp.get_attribute('class') or ''
+                                                if 'recquantity' in cls and declared_qty:
+                                                    self._portal_set_input_value(
+                                                        driver, inp, declared_qty
+                                                    )
+                                                if 'totItemCatgWeight' in cls and declared_weight:
+                                                    self._portal_set_input_value(
+                                                        driver, inp, declared_weight
+                                                    )
+                                        except Exception:
+                                            continue
+                                    filled_count += 1
+                                except Exception:
+                                    continue
+                            if filled_count:
+                                self.log(f"✅ Auto-filled {filled_count} table row(s)", 'acknowledge')
+                                self._sync_observed_net_totals(driver)
+                            self._fill_uat_article_weights(driver)
+                            self._sync_observed_net_totals(driver)
                             break
                             
                 except Exception as e:
@@ -4045,67 +6145,95 @@ class ManakDesktopApp:
             
             # Also fill the main observed weight and quantity fields
             try:
-                # Observed Net Weight AHC
-                observed_weight_field = self.driver.find_element(By.NAME, "observedNetWeightAHC")
-                if observed_weight_field.is_displayed() and observed_weight_field.is_enabled():
-                    # Get total weight from the table
-                    total_weight = self._get_total_weight_from_table()
+                # Observed Net Weight AHC (Fixed selector)
+                try:
+                    observed_weight_field = driver.find_element(By.ID, "observed_weight_ahc")
+                except:
+                    # Try by Name if ID fails
+                    observed_weight_field = driver.find_element(By.NAME, "observed_weight_ahc")
+                    
+                if observed_weight_field.is_displayed(): # field might be read-only but script fills it? 
+                    # Actually html says readonly="readonly". 
+                    # If it's readonly, we might need to remove readonly attribute or it might be auto-calculated?
+                    # But the User Request said "Error filling main fields... no such element... [name="observedNetWeightAHC"]"
+                    # So the code was trying to find it by name observedNetWeightAHC.
+                    
+                    self._sync_observed_net_totals(driver)
+                    total_weight = self._get_total_weight_from_table(driver)
                     if total_weight:
-                        observed_weight_field.clear()
-                        observed_weight_field.send_keys(total_weight)
+                        self._portal_set_input_value(
+                            driver, observed_weight_field, total_weight
+                        )
                         self.log(f"✅ Auto-filled Observed Net Weight: {total_weight}", 'acknowledge')
                 
-                # Observed net Quantity
-                observed_qty_field = self.driver.find_element(By.NAME, "observedNetQuantity")
-                if observed_qty_field.is_displayed() and observed_qty_field.is_enabled():
-                    # Get total quantity from the table
-                    total_qty = self._get_total_quantity_from_table()
+                # Observed Net Quantity (Fixed selector)
+                try:
+                    total_qty_field = driver.find_element(By.ID, "total_net_quantity")
+                except:
+                    total_qty_field = driver.find_element(By.NAME, "total_net_quantity")
+                    
+                if total_qty_field.is_displayed():
+                     # Get total qty
+                    total_qty = self._get_total_quantity_from_table(driver)
                     if total_qty:
-                        observed_qty_field.clear()
-                        observed_qty_field.send_keys(total_qty)
-                        self.log(f"✅ Auto-filled Observed Net Quantity: {total_qty}", 'acknowledge')
-                        
+                        self._portal_set_input_value(driver, total_qty_field, total_qty)
+                        self.log(f"✅ Auto-filled Observed Quantity: {total_qty}", 'acknowledge')
+
             except Exception as e:
                 self.log(f"⚠️ Error filling main fields: {str(e)}", 'acknowledge')
                 
         except Exception as e:
             self.log(f"❌ Error in auto-fill quantity and weight: {str(e)}", 'acknowledge')
             
-    def _get_total_weight_from_table(self):
-        """Get total weight from the item declaration table"""
+    def _get_total_weight_from_table(self, driver):
+        """Get total weight from item rows (.totItemCatgWeight) or declared weight column."""
         try:
-            tables = self.driver.find_elements(By.TAG_NAME, "table")
-            
+            total = 0.0
+            for inp in driver.find_elements(By.CSS_SELECTOR, 'input.totItemCatgWeight'):
+                try:
+                    if inp.is_displayed():
+                        v = float((inp.get_attribute('value') or '0').strip() or 0)
+                        total += v
+                except (ValueError, TypeError):
+                    continue
+            if total > 0:
+                return f"{total:.3f}".rstrip('0').rstrip('.') if total != int(total) else str(int(total))
+
+            tables = driver.find_elements(By.TAG_NAME, "table")
             for table in tables:
                 try:
                     rows = table.find_elements(By.TAG_NAME, "tr")
-                    if len(rows) > 1:
-                        header_row = rows[0]
-                        header_cells = header_row.find_elements(By.TAG_NAME, "th")
-                        header_texts = [cell.text.strip() for cell in header_cells]
-                        
-                        if "Item Category" in header_texts and "Tot. Item Category Weight" in header_texts:
-                            total_weight = 0
-                            for row in rows[1:]:
-                                cells = row.find_elements(By.TAG_NAME, "td")
-                                if len(cells) >= 4:
-                                    try:
-                                        weight_text = cells[3].text.strip()  # Weight column
-                                        weight = float(weight_text) if weight_text else 0
-                                        total_weight += weight
-                                    except:
-                                        continue
-                            return str(total_weight)
-                except:
+                    if len(rows) <= 1:
+                        continue
+                    header_cells = rows[0].find_elements(By.XPATH, './th|./td')
+                    header_texts = [c.text.strip() for c in header_cells]
+                    if not any('item category' in (h or '').lower() for h in header_texts):
+                        continue
+                    col = self._map_acknowledge_table_columns(header_texts)
+                    wcol = col.get('declared_weight', col.get('weight'))
+                    if wcol is None:
+                        continue
+                    for row in rows[1:]:
+                        cells = row.find_elements(By.TAG_NAME, "td")
+                        if len(cells) <= wcol:
+                            continue
+                        wt_text = self._cell_text_or_input(cells[wcol])
+                        try:
+                            total += float(wt_text) if wt_text else 0
+                        except (ValueError, TypeError):
+                            continue
+                    if total > 0:
+                        return f"{total:.3f}".rstrip('0').rstrip('.')
+                except Exception:
                     continue
             return None
-        except:
+        except Exception:
             return None
             
-    def _get_total_quantity_from_table(self):
+    def _get_total_quantity_from_table(self, driver):
         """Get total quantity from the item declaration table"""
         try:
-            tables = self.driver.find_elements(By.TAG_NAME, "table")
+            tables = driver.find_elements(By.TAG_NAME, "table")
             
             for table in tables:
                 try:
@@ -4767,11 +6895,20 @@ class ManakDesktopApp:
     def _generate_single_request_internal(self, order):
         """Internal method to generate a single request - delegated to RequestGenerator"""
         if RequestGenerator:
+            # Get generate URL from settings if available
+            generate_url = None
+            try:
+                if hasattr(self, 'settings') and isinstance(self.settings, dict):
+                    generate_url = self.settings.get('portal_generate_url')
+            except:
+                pass
+                
             generator = RequestGenerator(
                 self.driver, 
                 self.log, 
                 self.default_state_var, 
-                self.auto_fill_item_details_var
+                self.auto_fill_item_details_var,
+                generate_url=generate_url
             )
             return generator.generate_single_request_internal(order)
         else:
@@ -4836,7 +6973,7 @@ class ManakDesktopApp:
                 
                 # Try to clear any existing selection
                 try:
-                    from selenium.webdriver.support.ui import Select
+                    from selenium.webdriver.support.select import Select
                     select_element = Select(lot_dropdown)
                     # Deselect all options first
                     select_element.deselect_all()
@@ -4914,10 +7051,10 @@ class ManakDesktopApp:
             
             # Get values and convert to float
             try:
-                c1_init_val = float(c1_initial.get().strip() or 0)
-                c1_m2_val = float(c1_m2.get().strip() or 0)
-                c2_init_val = float(c2_initial.get().strip() or 0)
-                c2_m2_val = float(c2_m2.get().strip() or 0)
+                c1_init_val = float((c1_initial.get() if c1_initial else "0").strip() or 0)
+                c1_m2_val = float((c1_m2.get() if c1_m2 else "0").strip() or 0)
+                c2_init_val = float((c2_initial.get() if c2_initial else "0").strip() or 0)
+                c2_m2_val = float((c2_m2.get() if c2_m2 else "0").strip() or 0)
             except ValueError:
                 return
             
@@ -5377,6 +7514,39 @@ Strip 2:
         if hasattr(self, 'portal_password_var'):
             settings['portal_password'] = self.portal_password_var.get()
             
+        # Get reception credentials
+        if hasattr(self, 'reception_username_var'):
+            settings['reception_username'] = self.reception_username_var.get()
+        if hasattr(self, 'reception_password_var'):
+            settings['reception_password'] = self.reception_password_var.get()
+            
+        # Save API configuration
+        if hasattr(self, 'jeweller_api_url_var'):
+            settings['jeweller_api_url'] = self.jeweller_api_url_var.get()
+        if hasattr(self, 'check_jobs_api_url_var'):
+            settings['check_jobs_api_url'] = self.check_jobs_api_url_var.get()
+        if hasattr(self, 'save_job_api_url_var'):
+            settings['save_job_api_url'] = self.save_job_api_url_var.get()
+        if hasattr(self, 'manage_jeweller_api_url_var'):
+            settings['manage_jeweller_api_url'] = self.manage_jeweller_api_url_var.get()
+        if hasattr(self, 'get_jobs_api_url_var'):
+            settings['get_jobs_api_url'] = self.get_jobs_api_url_var.get()
+            
+        # Save API Base URL
+        if hasattr(self, 'api_base_url_var'):
+            settings['api_base_url'] = self.api_base_url_var.get()
+            
+        # Save Portal Configuration
+        if hasattr(self, 'portal_generate_url_var'):
+            settings['portal_generate_url'] = self.portal_generate_url_var.get()
+
+        # Save MANAK portal environment and login URL
+        if hasattr(self, 'portal_env_var'):
+            settings['portal_env'] = self.portal_env_var.get()
+            portal_config.set_portal_env(self.portal_env_var.get())
+        if hasattr(self, 'login_url_var'):
+            settings['login_url'] = self.login_url_var.get()
+            
         return settings
 
 
@@ -5397,6 +7567,311 @@ Strip 2:
             self.log(f"💾 Memory Usage: {memory_mb:.1f} MB {operation}", 'status')
         except Exception as e:
             self.log(f"⚠️ Could not get memory usage: {str(e)}", 'status')
+
+    def _handle_voucher_download(self, request_no):
+        """Handle voucher PDF download and extraction"""
+        try:
+            import glob
+            import os
+            import time
+            import re
+            
+            # Identify download directories to monitor
+            dirs_to_check = []
+            
+            # 1. Configured download dir
+            config_dir = getattr(self, 'download_dir', None)
+            if config_dir and os.path.exists(config_dir):
+                dirs_to_check.append(config_dir)
+            else:
+                dirs_to_check.append(os.path.join(os.getcwd(), 'downloads'))
+                
+            # 2. User Downloads dir (fallback)
+            user_downloads = os.path.join(os.path.expanduser('~'), 'Downloads')
+            if os.path.exists(user_downloads) and user_downloads not in dirs_to_check:
+                dirs_to_check.append(user_downloads)
+            
+            self.log(f"DEBUG: Monitoring dirs: {dirs_to_check}", 'acknowledge')
+            
+            # Snapshot existing keys
+            existing_files = set()
+            for d in dirs_to_check:
+                if os.path.exists(d):
+                    existing_files.update(glob.glob(os.path.join(d, "*.pdf")))
+            
+            # Wait for new file (max 30 seconds)
+            new_pdf = None
+            found_dir = None
+            
+            for _ in range(60): # 30 seconds
+                current_files = set()
+                for d in dirs_to_check:
+                    if os.path.exists(d):
+                        current_files.update(glob.glob(os.path.join(d, "*.pdf")))
+                
+                new_files = current_files - existing_files
+                
+                if new_files:
+                    # Filter out temporary download files (.crdownload etc)
+                    valid_new_files = [f for f in new_files if not f.endswith('.crdownload') and not f.endswith('.tmp')]
+                    if valid_new_files:
+                        # Find the most recent one if multiple appeared
+                        # Just take the first one logic for simplicity, or sort by mtime?
+                        # Let's take the one that is valid
+                        new_pdf = list(valid_new_files)[0] 
+                        found_dir = os.path.dirname(new_pdf)
+                        self.log(f"DEBUG: Found new file: {new_pdf}", 'acknowledge')
+                        break
+                time.sleep(0.5)
+                
+            if not new_pdf:
+                self.log("⚠️ No new PDF downloaded (timeout)", 'acknowledge')
+                return None
+                
+            # Wait for file to be fully written (size stable)
+            time.sleep(1.5) 
+            
+            extracted_license = None
+            
+            # Extract License No from original file first
+            try:
+                extracted_license = self._extract_license_from_pdf(new_pdf)
+            except Exception as e:
+                self.log(f"⚠️ Extraction from temp file failed: {e}", 'acknowledge')
+            
+            # Rename for organization
+            try:
+                extension = os.path.splitext(new_pdf)[1]
+                new_filename = f"Voucher_{request_no}{extension}"
+                
+                # Use target directory: configured download dir if available, else found dir
+                target_dir = getattr(self, 'download_dir', found_dir)
+                if not target_dir or not os.path.exists(target_dir):
+                     target_dir = found_dir
+                     
+                new_path = os.path.join(target_dir, new_filename)
+                
+                # Handle existing file
+                if os.path.exists(new_path):
+                    try:
+                        os.remove(new_path)
+                    except:
+                        pass # Ignore if permission error
+                    
+                if not os.path.exists(new_path):
+                    os.rename(new_pdf, new_path)
+                    self.log(f"✅ Downloaded voucher: {new_filename}", 'acknowledge')
+                else:
+                    self.log(f"⚠️ Could not overwrite existing voucher {new_filename}", 'acknowledge')
+                    
+            except Exception as e:
+                self.log(f"⚠️ Could not rename file: {e}", 'acknowledge')
+                
+            return extracted_license
+            
+        except Exception as e:
+            self.log(f"❌ Error handling download: {str(e)}", 'acknowledge')
+            return None
+
+    def _get_save_job_firm_id(self):
+        firm_id = 2
+        if hasattr(self, 'license_manager') and self.license_manager:
+            if hasattr(self.license_manager, 'firm_id') and self.license_manager.firm_id:
+                try:
+                    firm_id = int(self.license_manager.firm_id)
+                except (TypeError, ValueError):
+                    pass
+        return firm_id
+
+    def _build_save_job_payload(self, job_data, firm_id):
+        """Build save_job / save_jobs API payload for one row (job_no only if portal provided it)."""
+        req = job_data.get('request_no', '')
+        j_no = (job_data.get('job_no') or '').strip()
+        job = {
+            'request_no': req,
+            'licence_no': job_data.get('licence_no', ''),
+            'item': job_data.get('item', ''),
+            'pcs': job_data.get('pcs', 0),
+            'weight': job_data.get('weight', 0.0),
+            'purity': job_data.get('purity', ''),
+            'material_type': job_data.get('material_type', 'Gold'),
+            'date_of_request': job_data.get('date_of_request', ''),
+            'status': job_data.get('status', 'XRF'),
+            'huid_pcs': job_data.get('pcs', 0),
+            'is_billed': 0,
+            'cornet_weight': 0.0,
+            'scrp_cornet_weight': 0.0,
+            'bill_no': '',
+            'created_at': (job_data.get('date_of_request', '') or '') + ' 00:00:00',
+        }
+        if j_no:
+            job['job_no'] = j_no
+        return job
+
+    def _log_save_job_api_line(self, job):
+        self.log(
+            f"💾 API save → Req#{job.get('request_no')} | item={job.get('item')!r} | "
+            f"pcs={job.get('pcs')} | weight={job.get('weight')}g | purity={job.get('purity')!r} | "
+            f"licence={job.get('licence_no')} | material={job.get('material_type')}"
+            + (f" | job_no={job.get('job_no')}" if job.get('job_no') else ''),
+            'acknowledge',
+        )
+
+    def _handle_save_job_api_result(self, result, job):
+        """Log outcome of one save_job / save_jobs row."""
+        if not result.get('success'):
+            self.log(f"⚠️ API returned error: {result.get('message')}", 'acknowledge')
+            return False
+        msg = result.get('message', '')
+        if result.get('saved'):
+            row_id = result.get('id', '')
+            extra = f" (id={row_id})" if row_id else ''
+            self.log(
+                f"✅ Job card saved: Req#{job.get('request_no')} "
+                f"{job.get('item')} {job.get('pcs')}pc {job.get('weight')}g{extra}",
+                'acknowledge',
+            )
+            return True
+        self.log(f"ℹ️ Job not inserted: {msg}", 'acknowledge')
+        return False
+
+    def _is_legacy_request_only_duplicate(self, message):
+        """Old save_job_api blocked any 2nd row with same request_no (ignored item)."""
+        m = (message or '').lower()
+        return 'already exists for request' in m and 'same item' not in m
+
+    def _try_save_jobs_batch(self, jobs_with_data, request_no):
+        """POST all items in one request (needs updated save_job_api.php on server)."""
+        api_url = getattr(self, 'save_job_api_url_var', None)
+        if not api_url:
+            return False
+        url = api_url.get().strip()
+        if not url:
+            return False
+        try:
+            import requests
+            firm_id = self._get_save_job_firm_id()
+            jobs = [
+                self._build_save_job_payload(j) for j in jobs_with_data
+            ]
+            payload = {'action': 'save_jobs', 'firm_id': firm_id, 'jobs': jobs}
+            self.log(
+                f"💾 Batch API save ({len(jobs)} items) for Request #{request_no}...",
+                'acknowledge',
+            )
+            response = requests.post(url, json=payload, timeout=30)
+            if response.status_code != 200:
+                return False
+            result = response.json()
+            if not result.get('success'):
+                return False
+            for i, row in enumerate(result.get('results', []), 1):
+                item = row.get('item', jobs[i - 1].get('item', '') if i <= len(jobs) else '')
+                if row.get('saved'):
+                    self.log(
+                        f"✅ Batch row {i}/{len(jobs)} saved: {item}",
+                        'acknowledge',
+                    )
+                else:
+                    self.log(
+                        f"ℹ️ Batch row {i}/{len(jobs)} skipped: {row.get('message', '')}",
+                        'acknowledge',
+                    )
+            self.log(
+                f"✅ Batch complete: {result.get('saved_count', 0)}/{result.get('total', len(jobs))} saved",
+                'acknowledge',
+            )
+            return int(result.get('saved_count', 0) or 0) > 0
+        except Exception as e:
+            self.log(f"ℹ️ Batch save not available ({e}), saving row-by-row...", 'acknowledge')
+            return False
+
+    def _save_job_via_api(self, job_data):
+        """Save one job row via API. job_no is left empty at acknowledge (assigned later on portal)."""
+        try:
+            import requests
+
+            api_url = getattr(self, 'save_job_api_url_var', None)
+            if not api_url:
+                self.log("⚠️ No Save Job API URL configured - Skipping DB save", 'acknowledge')
+                return
+
+            url = api_url.get().strip()
+            if not url:
+                return
+
+            firm_id = self._get_save_job_firm_id()
+            job = self._build_save_job_payload(job_data, firm_id)
+            payload = {'action': 'save_job', 'firm_id': firm_id, 'job': job}
+            self._log_save_job_api_line(job)
+
+            response = requests.post(url, json=payload, timeout=10)
+            if response.status_code != 200:
+                self.log(
+                    f"❌ API HTTP Error: {response.status_code} - {response.text[:100]}",
+                    'acknowledge',
+                )
+                return
+
+            result = response.json()
+            if self._handle_save_job_api_result(result, job):
+                return
+
+            msg = result.get('message', '')
+            if self._is_legacy_request_only_duplicate(msg):
+                self.log(
+                    "⚠️ Server rejected extra items for this request (old API). "
+                    "Upload the updated server_scripts/save_job_api.php to hallmarkpro — "
+                    "it saves multiple items per request with empty job_no.",
+                    'acknowledge',
+                )
+
+        except Exception as e:
+            self.log(f"❌ Error saving job via API: {str(e)}", 'acknowledge')
+    def _extract_license_from_pdf(self, pdf_path):
+        """Extract license number from PDF (basic raw extraction)"""
+        try:
+            import re
+            
+            with open(pdf_path, 'rb') as f:
+                content = f.read()
+                
+            # Try to find "License No" pattern in raw bytes
+            # Patterns to try:
+            # 1. "License No. : CM/L-XXXXXXX"
+            # 2. "Licence No : XXXXXXX"
+            # 3. "CM/L-XXXXXXX"
+            patterns = [
+                rb'License\s*No[\s.:-]*([A-Z0-9/]+-\d+|[A-Z0-9/-]+)',
+                rb'Licence\s*No[\s.:-]*([A-Z0-9/]+-\d+|[A-Z0-9/-]+)',
+                rb'(CM/L-\d+)',
+                rb'(CM/L\s*-\s*\d+)',
+            ]
+            
+            for pattern in patterns:
+                # Use DOTALL to match across lines if needed, but here simple search should work
+                match = re.search(pattern, content, re.IGNORECASE)
+                if match:
+                    # Decode bytes to string
+                    try:
+                        license_no = match.group(1).decode('utf-8', errors='ignore').strip()
+                    except:
+                        license_no = str(match.group(1))
+                        
+                    # Clean up if matched too much
+                    # Remove trailing binary garbage if regex was greedy
+                    license_no = re.split(r'[^A-Z0-9/-]', license_no)[0]
+                    
+                    if len(license_no) > 5: # Basic validation
+                        self.log(f"🔍 Found License No in PDF: {license_no}", 'acknowledge')
+                        return license_no
+                    
+            self.log("⚠️ Could not extract License No from PDF text", 'acknowledge')
+            return None
+            
+        except Exception as e:
+            self.log(f"❌ Error extracting license from PDF: {str(e)}", 'acknowledge')
+            return None
     
 
 if __name__ == "__main__":

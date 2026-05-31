@@ -17,6 +17,17 @@ from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.common.keys import Keys
 
+from portal_config import portal_base, build_portal_url
+
+# Import simple embedded browser
+try:
+    from processors.simple_embedded_browser import open_page_in_app, WEBVIEW_AVAILABLE
+except ImportError:
+    WEBVIEW_AVAILABLE = False
+    def open_page_in_app(url, title="MANAK Portal"):
+        import webbrowser
+        webbrowser.open(url)
+
 
 class MultipleJobsProcessor:
     """Handles multiple job processing functionality"""
@@ -137,6 +148,12 @@ class MultipleJobsProcessor:
         auto_submit_check = ttk.Checkbutton(settings_frame, text="Auto Submit for HUID", 
                                           variable=self.auto_submit_huid_var)
         auto_submit_check.pack(anchor='w', pady=2)
+        
+        # Use Embedded Browser checkbox (prevents logout) - NEW
+        self.use_embedded_browser_var = tk.BooleanVar(value=True)  # Default ON
+        embedded_browser_check = ttk.Checkbutton(settings_frame, text="✓ Use Embedded Browser (prevents logout)", 
+                                                variable=self.use_embedded_browser_var)
+        embedded_browser_check.pack(anchor='w', pady=2)
         
         # Delay between jobs
         ttk.Label(settings_frame, text="Delay between jobs (seconds):").pack(anchor='w', pady=(8, 2))
@@ -894,9 +911,23 @@ class MultipleJobsProcessor:
                 self.log(f"🔄 Processing Lot {lot_no} for Job {job_no} ({i+1}/{total_lots})", 'multiple_jobs')
                 
                 # Load weight page
-                weight_url = f"https://huid.manakonline.in/MANAK/SamplingweightingDeatils?requestNo={request_no}&jobNo={job_no}"
-                self.driver.get(weight_url)
-                time.sleep(3)
+                encoded_request = base64.b64encode(str(request_no).encode()).decode()
+                encoded_job = base64.b64encode(str(job_no).encode()).decode()
+                weight_url = f"{portal_base()}/MANAK/UID_WeighingForm?requestNo={encoded_request}&jobNo={encoded_job}"
+                
+                # Check if user wants embedded browser (prevents logout)
+                if hasattr(self, 'use_embedded_browser_var') and self.use_embedded_browser_var.get():
+                    # Open in embedded browser - prevents logout!
+                    self.log(f"🌐 Opening page in embedded browser: {weight_url}", 'multiple_jobs')
+                    open_page_in_app(weight_url, f"Weight Entry - Job {job_no}")
+                    # Show message to user
+                    self.log(f"✅ Page opened in embedded browser. Fill the weights and save manually.", 'multiple_jobs')
+                    self.log(f"💡 The embedded browser keeps you logged in!", 'multiple_jobs')
+                    continue  # Skip automated filling since user will do it manually
+                else:
+                    # Use regular Selenium driver (old method, may cause logout)
+                    self.driver.get(weight_url)
+                    time.sleep(3)
                 
                 # Select lot
                 if not self._select_lot_in_portal(str(lot_no)):
@@ -1096,7 +1127,9 @@ class MultipleJobsProcessor:
                 self.log(f"💾 Saving initial weights for Lot {lot_no} in Job {job_no} ({i+1}/{total_lots})", 'multiple_jobs')
                 
                 # Load weight page
-                weight_url = f"https://huid.manakonline.in/MANAK/SamplingweightingDeatils?requestNo={request_no}&jobNo={job_no}"
+                encoded_request = base64.b64encode(str(request_no).encode()).decode()
+                encoded_job = base64.b64encode(str(job_no).encode()).decode()
+                weight_url = f"{portal_base()}/MANAK/UID_WeighingForm?requestNo={encoded_request}&jobNo={encoded_job}"
                 self.driver.get(weight_url)
                 time.sleep(3)
                 
@@ -1176,7 +1209,9 @@ class MultipleJobsProcessor:
                 self.log(f"⚖️ Saving cornet weights for Lot {lot_no} in Job {job_no} ({i+1}/{total_lots})", 'multiple_jobs')
                 
                 # Load weight page
-                weight_url = f"https://huid.manakonline.in/MANAK/SamplingweightingDeatils?requestNo={request_no}&jobNo={job_no}"
+                encoded_request = base64.b64encode(str(request_no).encode()).decode()
+                encoded_job = base64.b64encode(str(job_no).encode()).decode()
+                weight_url = f"{portal_base()}/MANAK/UID_WeighingForm?requestNo={encoded_request}&jobNo={encoded_job}"
                 self.driver.get(weight_url)
                 time.sleep(3)
                 
@@ -1849,11 +1884,11 @@ class MultipleJobsProcessor:
         try:
             if self.main_app and hasattr(self.main_app, 'report_api_url_var'):
                 api_url = self.main_app.report_api_url_var.get().strip()
-                return api_url if api_url else "https://hallmarkpro.prosenjittechhub.com/admin/get_report_by_id.php"
-            return "https://hallmarkpro.prosenjittechhub.com/admin/get_report_by_id.php"  # Default API URL
+                return api_url if api_url else "https://hallmarkpro.in/admin/get_report_by_id.php"
+            return "https://hallmarkpro.in/admin/get_report_by_id.php"  # Default API URL
         except Exception as e:
             self.log_jobs_card(f"❌ Error getting Report API URL: {e}")
-            return "https://hallmarkpro.prosenjittechhub.com/admin/get_report_by_id.php"  # Default API URL
+            return "https://hallmarkpro.in/admin/get_report_by_id.php"  # Default API URL
     
     def get_database_connection(self):
         """Get database connection with retry logic"""
@@ -2127,7 +2162,7 @@ class MultipleJobsProcessor:
                 return
             
             # Navigate to QM list page
-            qm_list_url = "https://huid.manakonline.in/MANAK/qualityManagerDesk_ListCompleted?hmType=HMQM"
+            qm_list_url = build_portal_url("/MANAK/qualityManagerDesk_ListCompleted?hmType=HMQM")
             self.driver.get(qm_list_url)
             time.sleep(3)
             

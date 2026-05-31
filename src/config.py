@@ -1,23 +1,40 @@
-"""
-Configuration file for MANAK Desktop Application
-This file contains sensitive configuration data.
-DO NOT commit this file to version control with real credentials.
-"""
-
 import os
+import sys
 
 # Database Configuration
-# You can set these as environment variables or modify the defaults here
+# IMPORTANT: Use environment variables instead of hardcoding credentials
+# Set these environment variables on your system:
+#   DB_HOST=your_host
+#   DB_DATABASE=your_database
+#   DB_USER=your_username
+#   DB_PASSWORD=your_password
+#   API_BASE_URL=your_api_url
+
 DB_CONFIG = {
-    'host': os.getenv('DB_HOST', '217.21.85.154'),
-    'database': os.getenv('DB_DATABASE', 'u176143338_hallmarkProver'),
-    'user': os.getenv('DB_USER', 'u176143338_hallmarkProver'),
-    'password': os.getenv('DB_PASSWORD', 'Rontik10@')
+    'host': os.getenv('DB_HOST', 'localhost'),
+    'database': os.getenv('DB_DATABASE', 'manak_db'),
+    'user': os.getenv('DB_USER', 'root'),
+    'password': os.getenv('DB_PASSWORD', '')  # Use environment variable!
 }
+
+# API Configuration - Load from environment variable or use default
+# Set API_BASE_URL environment variable for production
+API_BASE_URL = os.getenv('API_BASE_URL', 'https://hallmarkpro.in/admin/')
+if not API_BASE_URL.endswith('/'):
+    API_BASE_URL += '/'
+
+JEWELLER_API_URL = API_BASE_URL + "get_jewellers_api.php"
+CHECK_JOBS_API_URL = API_BASE_URL + "check_jobs_api.php"
+MANAGE_JEWELLER_API_URL = API_BASE_URL + "manage_jeweller_api.php"
+SAVE_JOB_API_URL = API_BASE_URL + "save_job_api.php"
+REPORT_API_URL = API_BASE_URL + "get_report_by_id.php"
+GET_JOBS_API_URL = API_BASE_URL + "get_jobs_api.php"
+REQUEST_API_URL = API_BASE_URL + "API/get_request_no.php"
+BILL_IMPORT_API_URL = API_BASE_URL + "bill_import_api.php"
 
 # Application Configuration
 APP_CONFIG = {
-    'version': '10.04',
+    'version': '10.0',
     'debug_mode': False,
     'log_level': 'INFO'
 }

@@ -15,7 +15,7 @@ source device_licenses.sql
 ```
 
 ### 2. API Configuration
-1. Upload `device_license_api.php` to your server (e.g., `https://hallmarkpro.prosenjittechhub.com/admin/`)
+1. Upload `device_license_api.php` to your server (e.g., `https://hallmarkpro.in/admin/`)
 2. Edit the database configuration in `device_license_api.php`:
 
 ```php
@@ -33,7 +33,7 @@ $api_key = 'your_secret_api_key_here';
 
 ### 3. Admin Panel Setup
 1. Upload `admin_panel.html` to your server
-2. Access it via: `https://hallmarkpro.prosenjittechhub.com/admin/admin_panel.html`
+2. Access it via: `https://hallmarkpro.in/admin/admin_panel.html`
 
 ## 🖥️ Client Application Setup
 

@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# Portal URLs use portal_config (Live / Demo from Settings)
 """
 Job Cards Processor Module
 Handles job cards data management and automatic job number fetching
@@ -17,6 +18,8 @@ from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.common.keys import Keys
 import os
 import sys
+
+from portal_config import build_portal_url
 
 # Fix MySQL localization issue BEFORE importing mysql.connector
 os.environ['LANG'] = 'C'
@@ -57,25 +60,16 @@ class JobCardsProcessor:
         self.setup_crash_logging()
     
     def get_firm_id_from_settings(self):
-        """Get Firm ID from device license or app settings or return default"""
+        """Get Firm ID from app settings only. Do not use default."""
         try:
-            # First, try to get firm_id from device license
-            if self.app_context and hasattr(self.app_context, 'license_manager'):
-                license_manager = self.app_context.license_manager
-                if hasattr(license_manager, 'firm_id') and license_manager.firm_id:
-                    print(f"🏢 Using firm_id from device license: {license_manager.firm_id}")
-                    return license_manager.firm_id
-            
-            # Fallback to app settings
             if self.app_context and hasattr(self.app_context, 'firm_id_var'):
                 firm_id = self.app_context.firm_id_var.get().strip()
                 if firm_id:
                     return firm_id
         except Exception as e:
-            print(f"Warning: Could not get Firm ID from license or settings: {e}")
-        
-        # Return default if nothing available
-        return '2'
+            print(f"Warning: Could not get Firm ID from settings: {e}")
+        # If not found, return None or raise error
+        return None
     
     def update_firm_id_from_settings(self):
         """Update current firm ID from device license or settings"""
@@ -850,7 +844,7 @@ class JobCardsProcessor:
             self.log_job_cards("🔍 Step 1: Scanning QM Received List...")
             
             # Navigate to QM Received List
-            qm_received_url = "https://huid.manakonline.in/MANAK/qualityManagerDesk_List?hmType=HMQM"
+            qm_received_url = build_portal_url("/MANAK/qualityManagerDesk_List?hmType=HMQM")
             self.driver.get(qm_received_url)
             
             # Wait for page to load
@@ -1292,7 +1286,7 @@ class JobCardsProcessor:
         """Fetch job numbers for a specific request - direct method"""
         try:
             # Navigate to QM Completed List
-            completed_url = "https://huid.manakonline.in/MANAK/qualityManagerDesk_ListCompleted?hmType=HMQM"
+            completed_url = build_portal_url("/MANAK/qualityManagerDesk_ListCompleted?hmType=HMQM")
             self.driver.get(completed_url)
             
             # Wait for page to load
@@ -1507,7 +1501,7 @@ class JobCardsProcessor:
             self.log_job_cards(f"🌐 Navigating to QM list for Request {request_no}...")
             
             # Navigate to QM list page
-            qm_list_url = "https://huid.manakonline.in/MANAK/qualityManagerDesk_ListCompleted?hmType=HMQM"
+            qm_list_url = build_portal_url("/MANAK/qualityManagerDesk_ListCompleted?hmType=HMQM")
             self.driver.get(qm_list_url)
             
             # Optimized wait - use WebDriverWait instead of time.sleep
@@ -2370,7 +2364,7 @@ class JobCardsProcessor:
             self.update_job_cards_status("Fetching QM Received List...", 'warning')
             
             # Step 1: Navigate to QM Received List
-            qm_received_url = "https://huid.manakonline.in/MANAK/qualityManagerDesk_List?hmType=HMQM"
+            qm_received_url = build_portal_url("/MANAK/qualityManagerDesk_List?hmType=HMQM")
             self.log_job_cards(f"🌐 Navigating to QM Received List: {qm_received_url}")
             self.driver.get(qm_received_url)
             
@@ -3012,7 +3006,7 @@ class JobCardsProcessor:
         """Fetch job numbers from QM completed list after creating job cards"""
         try:
             # Navigate to completed list
-            completed_url = "https://huid.manakonline.in/MANAK/qualityManagerDesk_ListCompleted?hmType=HMQM"
+            completed_url = build_portal_url("/MANAK/qualityManagerDesk_ListCompleted?hmType=HMQM")
             self.log_job_cards(f"🌐 Navigating to QM Completed List: {completed_url}")
             self.driver.get(completed_url)
             
@@ -3130,7 +3124,7 @@ class JobCardsProcessor:
                 return False
             
             # Navigate to QM Received List
-            qm_received_url = "https://huid.manakonline.in/MANAK/qualityManagerDesk_List?hmType=HMQM"
+            qm_received_url = build_portal_url("/MANAK/qualityManagerDesk_List?hmType=HMQM")
             self.driver.get(qm_received_url)
             
             # Wait for page to load

@@ -9,23 +9,25 @@ from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 
+from portal_config import get_default_portal_generate_url
+
 
 class RequestGenerator:
     """Handles request generation functionality"""
     
-    def __init__(self, driver, log_callback, default_state_var, auto_fill_item_details_var):
+    def __init__(self, driver, log_callback, default_state_var, auto_fill_item_details_var, generate_url=None):
         self.driver = driver
         self.log = log_callback
         self.default_state_var = default_state_var
         self.auto_fill_item_details_var = auto_fill_item_details_var
+        self.generate_url = generate_url or get_default_portal_generate_url()
     
     def generate_single_request_internal(self, order):
         """Internal method to generate a single request"""
         try:
             # Step 1: Open generate request page
             self.log(f"🔗 Opening generate request page for order {order['order_no']}", 'generate')
-            generate_url = "https://huid.manakonline.in/MANAK/AHC_RequestSubmission?cml_no=Q1JPL1JBSEMvUi0xMTAwNTg=&outletid=Mg==&EbranchId=OA==&requestno=&outletname=TUFIQUxBWE1JIEhBTExNQVJLIENFTlRSRQ=="
-            self.driver.get(generate_url)
+            self.driver.get(self.generate_url)
             time.sleep(1)
             
             # Step 2: Wait for page to load
@@ -39,8 +41,8 @@ class RequestGenerator:
                     EC.presence_of_element_located((By.CSS_SELECTOR, ".select2-container"))
                 )
                 self.log("✅ Select2 containers loaded", 'generate')
-            except:
-                self.log("⚠️ Select2 containers not found, proceeding anyway", 'generate')
+            except Exception as e:
+                self.log(f"⚠️ Select2 containers not found, proceeding anyway: {str(e)}", 'generate')
             
             # Step 3: Select State using Select2
             self.log("🏛️ Selecting state...", 'generate')
@@ -95,7 +97,7 @@ class RequestGenerator:
                         self.driver.find_element(By.TAG_NAME, "body").click()
                         time.sleep(0.5)
                         self.log("✅ Closed Select2 dropdown overlay", 'generate')
-                except:
+                except Exception:
                     pass
                 
                 # Wait a bit for any animations to complete
@@ -111,7 +113,7 @@ class RequestGenerator:
                     # Try clicking with JavaScript if regular click fails
                     try:
                         add_items_btn.click()
-                    except:
+                    except Exception:
                         self.driver.execute_script("arguments[0].click();", add_items_btn)
                     
                     time.sleep(1)
@@ -174,7 +176,7 @@ class RequestGenerator:
                                         break
                             if weight_field:
                                 break
-                        except:
+                        except Exception:
                             continue
                     
                     if weight_field and weight_field.is_displayed():
@@ -205,7 +207,7 @@ class RequestGenerator:
                             purity_container = self.driver.find_element(By.CSS_SELECTOR, selector)
                             if purity_container.is_displayed():
                                 break
-                        except:
+                        except Exception:
                             continue
                     
                     if purity_container:
@@ -216,13 +218,23 @@ class RequestGenerator:
                         purity_value = order['purity'].split()[0] if ' ' in order['purity'] else order['purity']
                         
                         # Find the search input and type the purity
-                        search_input = self.driver.find_element(By.CSS_SELECTOR, f"{purity_selectors[0]} .select2-input")
+                        # Fix: use the selector that actually worked
+                        actual_selector = purity_selectors[0]
+                        for s in purity_selectors:
+                            try:
+                                if self.driver.find_element(By.CSS_SELECTOR, s) == purity_container:
+                                    actual_selector = s
+                                    break
+                            except Exception:
+                                continue
+
+                        search_input = self.driver.find_element(By.CSS_SELECTOR, f"{actual_selector} .select2-input")
                         search_input.clear()
                         search_input.send_keys(purity_value)
                         time.sleep(1)
                         
                         # Select the first matching option
-                        options = self.driver.find_elements(By.CSS_SELECTOR, f"{purity_selectors[0]} .select2-results li")
+                        options = self.driver.find_elements(By.CSS_SELECTOR, f"{actual_selector} .select2-results li")
                         for option in options:
                             if purity_value in option.text:
                                 option.click()
@@ -266,7 +278,7 @@ class RequestGenerator:
                                 break
                         if save_btn:
                             break
-                    except:
+                    except Exception:
                         continue
                 
                 if save_btn and save_btn.is_displayed() and save_btn.is_enabled():
@@ -277,7 +289,7 @@ class RequestGenerator:
                     # Try clicking with JavaScript if regular click fails
                     try:
                         save_btn.click()
-                    except:
+                    except Exception:
                         self.driver.execute_script("arguments[0].click();", save_btn)
                     
                     time.sleep(1)
@@ -305,7 +317,7 @@ class RequestGenerator:
                                     break
                             if submit_btn:
                                 break
-                        except:
+                        except Exception:
                             continue
                     
                     if submit_btn:
@@ -353,7 +365,7 @@ class RequestGenerator:
                                     break
                             if submit_btn:
                                 break
-                        except:
+                        except Exception:
                             continue
                     
                     if submit_btn:
@@ -364,7 +376,7 @@ class RequestGenerator:
                         # Try clicking with JavaScript if regular click fails
                         try:
                             submit_btn.click()
-                        except:
+                        except Exception:
                             self.driver.execute_script("arguments[0].click();", submit_btn)
                         
                         time.sleep(1)
@@ -377,7 +389,7 @@ class RequestGenerator:
                             self.log(f"🔔 Alert: {alert_text}", 'generate')
                             alert.accept()
                             time.sleep(0.5)
-                        except:
+                        except Exception:
                             pass
                             
                         return True
@@ -398,9 +410,9 @@ class RequestGenerator:
                                     if element.is_displayed():
                                         self.log(f"✅ Found success indicator: {element.text}", 'generate')
                                         return True
-                                except:
+                                except Exception:
                                     continue
-                        except:
+                        except Exception:
                             pass
                         
                         raise Exception("Submit button not found and no success indicators")
@@ -422,7 +434,7 @@ class RequestGenerator:
                                 button.click()
                                 time.sleep(1)
                                 return True
-                except:
+                except Exception:
                     pass
                 
                 return False
@@ -440,7 +452,7 @@ class RequestGenerator:
                     container = self.driver.find_element(By.CSS_SELECTOR, selector)
                     if container.is_displayed():
                         break
-                except:
+                except Exception:
                     continue
             
             if not container:
@@ -450,13 +462,23 @@ class RequestGenerator:
             time.sleep(0.5)
             
             # Find the search input and type the value
-            search_input = self.driver.find_element(By.CSS_SELECTOR, f"{selectors[0]} .select2-input")
+            # Fix: find which selector worked
+            actual_selector = selectors[0]
+            for s in selectors:
+                try:
+                    if self.driver.find_element(By.CSS_SELECTOR, s) == container:
+                        actual_selector = s
+                        break
+                except Exception:
+                    continue
+
+            search_input = self.driver.find_element(By.CSS_SELECTOR, f"{actual_selector} .select2-input")
             search_input.clear()
             search_input.send_keys(value)
             time.sleep(1)
             
             # Select the first matching option
-            options = self.driver.find_elements(By.CSS_SELECTOR, f"{selectors[0]} .select2-results li")
+            options = self.driver.find_elements(By.CSS_SELECTOR, f"{actual_selector} .select2-results li")
             for option in options:
                 if value in option.text:
                     option.click()

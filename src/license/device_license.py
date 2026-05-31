@@ -18,7 +18,7 @@ from tkinter import messagebox
 
 class DeviceLicenseManager:
     def __init__(self):
-        self.api_url = "https://hallmarkpro.prosenjittechhub.com/admin/device_license_api.php"
+        self.api_url = "https://hallmarkpro.in/admin/device_license_api.php"
         self.device_id = None
         self.mac_address = None
         self.user_id = None

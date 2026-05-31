@@ -3,7 +3,7 @@
  * Device License API for MANAK Automation
  * Handles device registration and verification
  * 
- * Server: https://hallmarkpro.prosenjittechhub.com/admin/
+ * Server: https://hallmarkpro.in/admin/
  * Database: Your database with device_licenses table
  */
 

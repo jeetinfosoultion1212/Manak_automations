@@ -15,6 +15,7 @@ from selenium.webdriver.common.keys import Keys
 import base64
 
 from config import DB_CONFIG
+from portal_config import build_portal_url, portal_base
 
 
 class DeliveryVoucherProcessor:
@@ -257,7 +258,7 @@ class DeliveryVoucherProcessor:
             self.log_delivery(f"🌐 Navigating to delivery voucher list page...")
             
             # Navigate to delivery voucher list page
-            list_url = "https://huid.manakonline.in/MANAK/NewArticlesListForDelieveryVoucher"
+            list_url = build_portal_url("/MANAK/NewArticlesListForDelieveryVoucher")
             self.driver.get(list_url)
             
             # Wait for page to load
@@ -285,16 +286,38 @@ class DeliveryVoucherProcessor:
             
             self.log_delivery(f"✅ Found {len(portal_jobs)} jobs on delivery voucher list")
             
-            # Now get weight data from database for these specific jobs
-            self.log_delivery(f"📊 Fetching weight data from database...")
+            # Now get weight data from database for these specific jobs via API
+            self.log_delivery(f"📊 Fetching weight data from database via API...")
             
-            # Get database connection
-            import mysql.connector
-            # Add auth_plugin to fix MySQL 8.0+ authentication compatibility
-            db_config_with_auth = self.db_config.copy()
-            db_config_with_auth['auth_plugin'] = 'mysql_native_password'
-            connection = mysql.connector.connect(**db_config_with_auth)
-            cursor = connection.cursor()
+            import requests
+            from config import GET_JOBS_API_URL
+            
+            # Prepare payload for API
+            job_numbers = [job['job_no'] for job in portal_jobs]
+            
+            payload = {
+                'action': 'get_job_details_for_voucher',
+                'firm_id': str(self.current_firm_id),
+                'job_numbers': job_numbers
+            }
+            
+            try:
+                response = requests.post(GET_JOBS_API_URL, json=payload, timeout=15)
+                
+                if response.status_code != 200:
+                    self.log_delivery(f"❌ API Request Failed: Status {response.status_code}")
+                    return
+                
+                result = response.json()
+                if result.get('status') != 'success':
+                    self.log_delivery(f"❌ API Error: {result.get('message')}")
+                    return
+                    
+                db_jobs = result.get('data', [])
+                
+            except Exception as api_error:
+                self.log_delivery(f"❌ API Connection Error: {str(api_error)}")
+                return
             
             # Clear existing data
             self.jobs_tree.delete(*self.jobs_tree.get_children())
@@ -303,33 +326,39 @@ class DeliveryVoucherProcessor:
             
             loaded_count = 0
             
-            # For each job from portal, get weight data from database
+            # Process jobs
             for portal_job in portal_jobs:
                 request_no = portal_job['request_no']
                 job_no = portal_job['job_no']
                 
-                # Query database for this specific job
-                query = """
-                    SELECT id, item, weight, scrp_cornet_weight
-                    FROM job_cards
-                    WHERE firm_id = %s AND job_no = %s
-                    LIMIT 1
-                """
-                
-                cursor.execute(query, (self.current_firm_id, job_no))
-                result = cursor.fetchone()
-                
-                if not result:
+                # Check if we have data for this job
+                if job_no not in db_jobs:
                     self.log_delivery(f"⚠️ Job {job_no} not found in database")
                     continue
                 
-                id_val, item, weight, scrap_weight = result
+                job_data = db_jobs[job_no]
+                
+                id_val = job_data.get('id')
+                item = job_data.get('item', '')
+                weight = job_data.get('weight', 0)
+                scrap_weight = job_data.get('scrap_weight', 0)
                 
                 # Calculate weights
                 weight_gms = float(weight) if weight else 0
-                scrap_gms = float(scrap_weight) if scrap_weight else 0
+                
+                # Check if scrap_weight is None or empty
+                scrap_val = 0
+                if scrap_weight is not None and scrap_weight != '':
+                    scrap_val = float(scrap_weight)
+                
+                # Database stores scrap weight in grams usually, need to verify
+                # Logic in original code: scrap_mgs = scrap_gms * 1000
+                # Assuming database stores grams for scrp_cornet_weight
+                
+                scrap_gms = scrap_val
                 scrap_mgs = scrap_gms * 1000  # Convert to milligrams
                 return_gms = weight_gms - scrap_gms
+                
                 loaded_count += 1
                 
                 # Add to tree
@@ -356,10 +385,7 @@ class DeliveryVoucherProcessor:
                     'return_gms': return_gms
                 })
             
-            cursor.close()
-            connection.close()
-            
-            self.log_delivery(f"✅ Loaded {loaded_count} jobs ready for delivery voucher")
+            self.log_delivery(f"✅ Loaded {loaded_count} jobs ready for delivery voucher via API")
             
         except Exception as e:
             self.log_delivery(f"❌ Error loading jobs: {str(e)}")
@@ -503,7 +529,7 @@ class DeliveryVoucherProcessor:
                 return False
             
             # Navigate to delivery voucher list page
-            list_url = "https://huid.manakonline.in/MANAK/NewArticlesListForDelieveryVoucher"
+            list_url = build_portal_url("/MANAK/NewArticlesListForDelieveryVoucher")
             self.log_delivery(f"🌐 Navigating to delivery voucher list...")
             self.driver.get(list_url)
             
@@ -551,16 +577,34 @@ class DeliveryVoucherProcessor:
                 
                 # Fill the form
                 # Weight of Article Returned in gms
-                final_weight_input = self.driver.find_element(By.ID, "finalWeightReturned")
-                final_weight_input.clear()
-                final_weight_input.send_keys(str(round(return_weight_gms, 3)))
-                self.log_delivery(f"  ✓ Weight of Article Returned: {return_weight_gms:.3f} gms")
-                
+                try:
+                    final_weight_input = self.driver.find_element(By.ID, "finalWeightReturned")
+                    final_weight_input.click()
+                    # Robust clear
+                    final_weight_input.send_keys(Keys.CONTROL + "a")
+                    final_weight_input.send_keys(Keys.DELETE)
+                    # Input value
+                    final_weight_input.send_keys(str(round(return_weight_gms, 3)))
+                    final_weight_input.send_keys(Keys.TAB) # Trigger change events
+                    time.sleep(0.5)
+                    self.log_delivery(f"  ✓ Weight of Article Returned: {return_weight_gms:.3f} gms")
+                except Exception as e:
+                     self.log_delivery(f"  ⚠️ Error setting return weight: {e}")
+
                 # Weight of Scrapping in mgs
-                scrap_input = self.driver.find_element(By.ID, "sampleScrap")
-                scrap_input.clear()
-                scrap_input.send_keys(str(round(scrap_weight_mgs, 1)))
-                self.log_delivery(f"  ✓ Weight of Scrapping: {scrap_weight_mgs:.1f} mgs")
+                try:
+                    scrap_input = self.driver.find_element(By.ID, "sampleScrap")
+                    scrap_input.click()
+                    # Robust clear
+                    scrap_input.send_keys(Keys.CONTROL + "a")
+                    scrap_input.send_keys(Keys.DELETE)
+                    # Input value
+                    scrap_input.send_keys(str(round(scrap_weight_mgs, 1)))
+                    scrap_input.send_keys(Keys.TAB) # Trigger change events
+                    time.sleep(0.5)
+                    self.log_delivery(f"  ✓ Weight of Scrapping: {scrap_weight_mgs:.1f} mgs")
+                except Exception as e:
+                     self.log_delivery(f"  ⚠️ Error setting scrap weight: {e}")
                 
                 # Wait for any loader/preloader to disappear before submitting
                 try:

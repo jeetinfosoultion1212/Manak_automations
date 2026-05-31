@@ -16,6 +16,8 @@ from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.common.exceptions import TimeoutException, NoSuchElementException
 
+from portal_config import build_portal_url
+
 
 class HUIDDataProcessor:
     """Handles HUID data extraction and submission functionality"""
@@ -24,8 +26,8 @@ class HUIDDataProcessor:
         self.driver = driver
         self.log = log_callback
         self.check_license_before_action = license_check_callback
-        self.api_base_url = "https://hallmarkpro.prosenjittechhub.com/admin"
-        self.articles_url = "https://huid.manakonline.in/MANAK/NewArticlesListForWeighing"
+        self.api_base_url = "https://hallmarkpro.in/admin"
+        self.articles_url = build_portal_url("/MANAK/NewArticlesListForWeighing")
         self.extracted_data = []
         
         # Auto monitoring variables

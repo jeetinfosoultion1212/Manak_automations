@@ -43,7 +43,7 @@ builtins.print = safe_print
 print = safe_print
 
 import tkinter as tk
-from tkinter import ttk, scrolledtext, messagebox, simpledialog
+from tkinter import ttk, scrolledtext, messagebox, simpledialog, filedialog
 import threading
 import time
 from datetime import datetime
@@ -209,6 +209,297 @@ class LoadingDialog:
         """Close the dialog"""
         self.dialog.destroy()
 
+
+class TagWeightExcelDialog:
+    """In-app dialog: download tag-weight template, edit in Excel, upload/apply."""
+
+    def __init__(self, parent, tag_rows, request_no='', tag_prefix=''):
+        self.tag_rows = tag_rows or []
+        self.request_no = request_no or ''
+        self.tag_prefix = (tag_prefix or '').strip()
+        self.upload_path = None
+        self.downloaded_path = None
+        self.result = None
+
+        self.dialog = tk.Toplevel(parent)
+        self.dialog.title('Tag Weight Excel')
+        self.dialog.geometry('560x480')
+        self.dialog.configure(bg='#f0f2f5')
+        self.dialog.resizable(False, False)
+        self.dialog.transient(parent)
+        # Do not grab focus — user must switch to Excel while this stays open.
+
+        self.dialog.update_idletasks()
+        x = (self.dialog.winfo_screenwidth() // 2) - (560 // 2)
+        y = (self.dialog.winfo_screenheight() // 2) - (480 // 2)
+        self.dialog.geometry(f'560x480+{x}+{y}')
+
+        main = ttk.Frame(self.dialog, padding=16)
+        main.pack(fill='both', expand=True)
+
+        ttk.Label(
+            main,
+            text='Tag Weight — Download & Upload',
+            font=('Segoe UI', 12, 'bold'),
+        ).pack(anchor='w')
+
+        info = (
+            f"Request: {self.request_no or '—'}  |  "
+            f"Tags found: {len(self.tag_rows)}  |  "
+            f"Prefix: {self.tag_prefix or '(none — portal auto tags)'}"
+        )
+        ttk.Label(main, text=info, font=('Segoe UI', 9), foreground='#495057').pack(
+            anchor='w', pady=(6, 6)
+        )
+
+        ttk.Label(
+            main,
+            text='Keep this window open. Switch to Excel, fill weights, save, then return here.',
+            font=('Segoe UI', 9, 'italic'),
+            foreground='#0d6efd',
+            wraplength=520,
+        ).pack(anchor='w', pady=(0, 8))
+
+        steps = ttk.LabelFrame(main, text='Steps', padding=10)
+        steps.pack(fill='x', pady=(0, 10))
+        ttk.Label(
+            steps,
+            text=(
+                '1. Download template (opens in Excel automatically).\n'
+                '2. Fill Weight (Gms) for each tag and save the file.\n'
+                '3. Click Apply Weights (uses the saved file — no need to upload again).'
+            ),
+            font=('Segoe UI', 9),
+            justify='left',
+        ).pack(anchor='w')
+
+        btn_row = ttk.Frame(main)
+        btn_row.pack(fill='x', pady=(0, 6))
+        ttk.Button(
+            btn_row, text='⬇ Download Excel Template',
+            command=self._download_template,
+        ).pack(side='left', padx=(0, 8))
+        self.open_excel_btn = ttk.Button(
+            btn_row, text='📂 Open Excel File',
+            command=self._open_downloaded_file,
+            state='disabled',
+        )
+        self.open_excel_btn.pack(side='left', padx=(0, 8))
+        ttk.Button(
+            btn_row, text='⬆ Choose Different File',
+            command=self._browse_upload,
+        ).pack(side='left')
+
+        self.file_label = ttk.Label(
+            main,
+            text='Download the template first — it will open in Excel.',
+            font=('Segoe UI', 9),
+            foreground='#6c757d',
+            wraplength=520,
+        )
+        self.file_label.pack(anchor='w', pady=(0, 4))
+
+        self.next_step_label = ttk.Label(
+            main,
+            text='After saving Excel → click the green "Apply Weights" button below.',
+            font=('Segoe UI', 10, 'bold'),
+            foreground='#198754',
+            wraplength=520,
+        )
+        self.next_step_label.pack(anchor='w', pady=(0, 8))
+
+        preview = ttk.LabelFrame(main, text='Tags on this page', padding=8)
+        preview.pack(fill='both', expand=True, pady=(0, 10))
+
+        cols = ('S.No.', 'Tag Id', 'Item', 'Qty')
+        self.preview_tree = ttk.Treeview(preview, columns=cols, show='headings', height=5)
+        for c, w in zip(cols, (50, 80, 180, 50)):
+            self.preview_tree.heading(c, text=c)
+            self.preview_tree.column(c, width=w, anchor='center' if c != 'Item' else 'w')
+        scroll = ttk.Scrollbar(preview, orient='vertical', command=self.preview_tree.yview)
+        self.preview_tree.configure(yscrollcommand=scroll.set)
+        self.preview_tree.pack(side='left', fill='both', expand=True)
+        scroll.pack(side='right', fill='y')
+
+        for row in self.tag_rows[:50]:
+            self.preview_tree.insert('', 'end', values=(
+                row.get('sno', ''),
+                row.get('tag_id', ''),
+                row.get('category', ''),
+                row.get('qty', ''),
+            ))
+        if len(self.tag_rows) > 50:
+            self.preview_tree.insert('', 'end', values=('…', f'+{len(self.tag_rows) - 50} more', '', ''))
+
+        actions = ttk.Frame(main)
+        actions.pack(fill='x')
+        ttk.Button(actions, text='Cancel Request', command=self._cancel).pack(side='right', padx=(8, 0))
+        self.apply_btn = ttk.Button(
+            actions,
+            text='✅ Apply Weights to Portal',
+            style='Success.TButton',
+            command=self._apply,
+        )
+        self.apply_btn.pack(side='right')
+
+        self.dialog.protocol('WM_DELETE_WINDOW', self._cancel)
+
+    def _default_download_name(self):
+        req = self.request_no or 'request'
+        prefix = self.tag_prefix or 'tags'
+        safe_prefix = ''.join(ch for ch in prefix if ch.isalnum() or ch in ('_', '-'))[:12]
+        return f"tag_weights_{req}_{safe_prefix}.xlsx"
+
+    def _open_file_externally(self, path):
+        if not path or not os.path.isfile(path):
+            messagebox.showwarning('File Not Found', 'Excel file not found.', parent=self.dialog)
+            return
+        try:
+            os.startfile(os.path.abspath(path))
+        except AttributeError:
+            import subprocess
+            subprocess.Popen(['xdg-open', path])
+        except Exception as e:
+            messagebox.showerror('Open Error', str(e), parent=self.dialog)
+
+    def _open_downloaded_file(self):
+        self._open_file_externally(self.downloaded_path)
+
+    def _set_file_ready(self, path, source='download'):
+        self.upload_path = path
+        self.file_label.config(
+            text=f'Excel file ready:\n{path}',
+            foreground='#198754',
+        )
+        if source == 'download':
+            self.next_step_label.config(
+                text='Fill Weight (Gms) in Excel, SAVE the file, then click '
+                     '"Apply Weights to Portal" below.',
+                foreground='#198754',
+            )
+        else:
+            self.next_step_label.config(
+                text='File selected. Click "Apply Weights to Portal" to fill '
+                     'weights on the MANAK page.',
+                foreground='#198754',
+            )
+        self.apply_btn.config(text='✅ Apply Weights to Portal')
+
+    def _download_template(self):
+        default_name = self._default_download_name()
+        save_path = filedialog.asksaveasfilename(
+            parent=self.dialog,
+            title='Save Tag Weight Excel Template',
+            defaultextension='.xlsx',
+            initialfile=default_name,
+            filetypes=[('Excel files', '*.xlsx'), ('All files', '*.*')],
+        )
+        if not save_path:
+            return
+        if not save_path.lower().endswith('.xlsx'):
+            save_path += '.xlsx'
+        try:
+            self._write_template(save_path)
+            self.downloaded_path = save_path
+            self.open_excel_btn.config(state='normal')
+            self._set_file_ready(save_path, source='download')
+            self.dialog.lift()
+            self._open_file_externally(save_path)
+        except Exception as e:
+            messagebox.showerror('Download Error', str(e), parent=self.dialog)
+
+    def _write_template(self, file_path):
+        from openpyxl import Workbook
+        from openpyxl.styles import Font, PatternFill, Alignment
+
+        wb = Workbook()
+        ws = wb.active
+        ws.title = 'Tag Weights'
+
+        ws['A1'] = 'Request No'
+        ws['B1'] = self.request_no
+        ws['A2'] = 'Tag Prefix'
+        ws['B2'] = self.tag_prefix or 'Auto (portal generated)'
+
+        headers = [
+            'S.No.', 'Tag Id (AHC)', 'Item Category', 'Quantity',
+            'Declared Purity', 'Weight (Gms)',
+        ]
+        header_row = 4
+        fill = PatternFill('solid', fgColor='D9EAF7')
+        bold = Font(bold=True)
+        for col_idx, title in enumerate(headers, 1):
+            cell = ws.cell(row=header_row, column=col_idx, value=title)
+            cell.font = bold
+            cell.fill = fill
+            cell.alignment = Alignment(horizontal='center')
+
+        for i, row in enumerate(self.tag_rows, header_row + 1):
+            ws.cell(row=i, column=1, value=row.get('sno', ''))
+            ws.cell(row=i, column=2, value=row.get('tag_id', ''))
+            ws.cell(row=i, column=3, value=row.get('category', ''))
+            ws.cell(row=i, column=4, value=row.get('qty', ''))
+            ws.cell(row=i, column=5, value=row.get('purity', ''))
+            ws.cell(row=i, column=6, value='')
+
+        from openpyxl.utils import get_column_letter
+        for col_idx, width in enumerate((8, 14, 22, 10, 14, 14), 1):
+            ws.column_dimensions[get_column_letter(col_idx)].width = width
+
+        wb.save(file_path)
+
+    def _browse_upload(self):
+        initial_dir = os.path.dirname(self.downloaded_path) if self.downloaded_path else None
+        initial_file = os.path.basename(self.downloaded_path) if self.downloaded_path else ''
+        path = filedialog.askopenfilename(
+            parent=self.dialog,
+            title='Choose Filled Tag Weight Excel',
+            initialdir=initial_dir,
+            initialfile=initial_file,
+            filetypes=[
+                ('Excel files', '*.xlsx *.xls'),
+                ('All files', '*.*'),
+            ],
+        )
+        if path:
+            self.downloaded_path = self.downloaded_path or path
+            self._set_file_ready(path, source='upload')
+
+    def _apply(self):
+        use_path = self.upload_path or self.downloaded_path
+        if not use_path:
+            messagebox.showwarning(
+                'Download Required',
+                'Please download the Excel template first.',
+                parent=self.dialog,
+            )
+            return
+        if not os.path.isfile(use_path):
+            messagebox.showwarning(
+                'File Not Found',
+                'Excel file not found. Download again or choose a different file.',
+                parent=self.dialog,
+            )
+            return
+        self.result = use_path
+        self.dialog.destroy()
+
+    def _cancel(self):
+        if self.downloaded_path or self.upload_path:
+            if not messagebox.askyesno(
+                'Cancel Tag Weights?',
+                'Tag weights are not applied yet.\n\n'
+                'Close this window and mark this request as failed?',
+                parent=self.dialog,
+            ):
+                return
+        self.result = None
+        self.dialog.destroy()
+
+    def run(self):
+        self.dialog.wait_window()
+        return self.result
+
 class ManakDesktopApp:
     def __init__(self):
         # Initialize device licensing first
@@ -242,6 +533,8 @@ class ManakDesktopApp:
         self.logged_in = False
         self.page_loaded = False
         self.license_verified = False  # Track license verification status
+        self._fetch_request_list_lock = threading.Lock()
+        self._fetch_request_list_running = False
         self.tag_manager = TagManager() if TagManager else None
         
         # API configuration variables
@@ -4274,8 +4567,11 @@ class ManakDesktopApp:
         controls_frame.pack(fill='x', side='top')
         
         # Left: Action Buttons
-        ttk.Button(controls_frame, text="📋 Fetch Requests", style='Info.TButton', 
-                   command=self.fetch_request_list).pack(side='left', padx=2)
+        self.fetch_requests_btn = ttk.Button(
+            controls_frame, text="📋 Fetch Requests", style='Info.TButton',
+            command=self.fetch_request_list,
+        )
+        self.fetch_requests_btn.pack(side='left', padx=2)
                    
         self.auto_acknowledge_all_btn = ttk.Button(controls_frame, text="🤖 Auto Acknowledge All", 
                                                  style='Success.TButton', command=self.auto_acknowledge_all_requests,
@@ -4290,9 +4586,12 @@ class ManakDesktopApp:
         ttk.Checkbutton(controls_frame, text="Save Job Data", variable=self.save_job_data_var).pack(side='left', padx=10)
         
         self.auto_fill_qty_weight_var = tk.BooleanVar(value=True)
-        # Hidden or available? User didn't ask, but logic needs it. I'll keep it active but hidden to unclutter, or add small checkbox.
-        # Adding small checkbox
         ttk.Checkbutton(controls_frame, text="Auto-fill Wt", variable=self.auto_fill_qty_weight_var).pack(side='left', padx=5)
+
+        self.fill_tag_weight_excel_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(
+            controls_frame, text="Tag Wt (Excel)", variable=self.fill_tag_weight_excel_var
+        ).pack(side='left', padx=5)
 
         # Right: Toggles
         # Log Toggle
@@ -4709,13 +5008,20 @@ class ManakDesktopApp:
         best_score = -1
         for table in driver.find_elements(By.TAG_NAME, 'table'):
             try:
-                text = (table.text or '')[:800].lower()
-                if 'request' not in text:
+                header_cells = table.find_elements(
+                    By.XPATH,
+                    './/thead/tr[1]/*|.//tr[1]/th|.//tr[1]/td',
+                )
+                header_text = ' '.join(
+                    (c.text or '').strip().lower() for c in header_cells[:10]
+                )
+                if 'request no' not in header_text and 'request' not in header_text:
                     continue
+
                 score = 0
-                if 'request no' in text:
+                if 'request no' in header_text:
                     score += 3
-                if 'jeweller' in text or 'received request' in text:
+                if 'jeweller' in header_text or 'outlet name' in header_text:
                     score += 2
                 links = table.find_elements(
                     By.XPATH,
@@ -4822,6 +5128,214 @@ class ManakDesktopApp:
             )
         return requests
 
+    def _detect_request_list_page(self, driver):
+        """Detect the active page number on the received-request list."""
+        selectors = (
+            ".dataTables_paginate a.paginate_button.current",
+            ".dataTables_paginate span.paginate_button.current",
+            "ul.pagination li.active a",
+            "ul.pagination li.active span",
+            ".pagination li.active a",
+            "li.paginate_button.active a",
+        )
+        for selector in selectors:
+            try:
+                for el in driver.find_elements(By.CSS_SELECTOR, selector):
+                    text = (el.text or '').strip()
+                    if text.isdigit():
+                        return int(text)
+            except Exception:
+                continue
+        return None
+
+    def _find_request_list_paginate_root(self, driver, request_table=None):
+        """Locate pagination controls for the received-request table."""
+        candidates = []
+        if request_table is not None:
+            try:
+                xpaths = (
+                    "./ancestor::div[contains(@class,'dataTables_wrapper')]"
+                    "//div[contains(@class,'dataTables_paginate')]",
+                    "./following-sibling::div[contains(@class,'dataTables_paginate')]",
+                    "./following::ul[contains(@class,'pagination')][1]",
+                    "./following::div[contains(@class,'pagination')][1]",
+                )
+                for xpath in xpaths:
+                    candidates.extend(request_table.find_elements(By.XPATH, xpath))
+            except Exception:
+                pass
+
+        for selector in (
+            "div.dataTables_paginate",
+            "div[id$='_paginate']",
+            "ul.pagination",
+            "div.pagination",
+        ):
+            try:
+                candidates.extend(driver.find_elements(By.CSS_SELECTOR, selector))
+            except Exception:
+                continue
+
+        seen = set()
+        for el in candidates:
+            try:
+                key = el.id or str(id(el))
+                if key in seen:
+                    continue
+                seen.add(key)
+                if el.is_displayed() and el.find_elements(By.TAG_NAME, 'a'):
+                    return el
+            except Exception:
+                continue
+        return None
+
+    def _pagination_control_disabled(self, el):
+        cls = (el.get_attribute('class') or '').lower()
+        if 'disabled' in cls:
+            return True
+        try:
+            parent_cls = (el.find_element(By.XPATH, '..').get_attribute('class') or '').lower()
+            if 'disabled' in parent_cls:
+                return True
+        except Exception:
+            pass
+        return False
+
+    def _click_pagination_control(self, driver, el):
+        try:
+            driver.execute_script("arguments[0].scrollIntoView({block:'center'});", el)
+            time.sleep(0.2)
+            try:
+                el.click()
+            except Exception:
+                driver.execute_script("arguments[0].click();", el)
+            time.sleep(1.2)
+            return True
+        except Exception:
+            return False
+
+    def _first_request_no_in_table(self, table):
+        """Return the first request number visible in a table (for page-change detection)."""
+        try:
+            rows = table.find_elements(By.XPATH, './/tbody/tr[td]')
+            if not rows:
+                rows = [
+                    r for r in table.find_elements(By.TAG_NAME, 'tr')
+                    if r.find_elements(By.TAG_NAME, 'td')
+                ]
+            for row in rows:
+                cells = row.find_elements(By.TAG_NAME, 'td')
+                if len(cells) >= 2:
+                    text = cells[1].text.strip()
+                    if text and any(ch.isdigit() for ch in text):
+                        return text
+        except Exception:
+            pass
+        return None
+
+    def _wait_for_request_list_page_change(self, driver, expected_page, before_first_req, timeout=12):
+        """Wait until pagination lands on the expected page or table rows change."""
+        def _changed(_driver):
+            detected = self._detect_request_list_page(_driver)
+            if detected == expected_page:
+                return True
+            if before_first_req:
+                table = self._find_received_requests_table(_driver)
+                if table:
+                    after_first = self._first_request_no_in_table(table)
+                    if after_first and after_first != before_first_req:
+                        return True
+            return False
+
+        try:
+            WebDriverWait(driver, timeout).until(_changed)
+            return True
+        except Exception:
+            return _changed(driver)
+
+    def _go_to_next_request_list_page(self, driver, current_page, request_table=None):
+        """Navigate to the next received-request list page. Returns new page number or None."""
+        paginate = self._find_request_list_paginate_root(driver, request_table)
+        detected = self._detect_request_list_page(driver)
+        if detected:
+            current_page = detected
+        next_page = current_page + 1
+        before_first_req = self._first_request_no_in_table(request_table) if request_table else None
+
+        def _try_click(el, expected_page):
+            if not el.is_displayed() or self._pagination_control_disabled(el):
+                return None
+            if not self._click_pagination_control(driver, el):
+                return None
+            if not self._wait_for_request_list_page_change(
+                driver, expected_page, before_first_req
+            ):
+                return None
+
+            after = self._detect_request_list_page(driver)
+            if after and after != expected_page:
+                self.log(
+                    f"⚠️ Pagination landed on page {after}, expected {expected_page}",
+                    'acknowledge',
+                )
+                return None
+
+            self.log(f"🔄 Moved to page {expected_page}", 'acknowledge')
+            return expected_page
+
+        search_roots = [paginate] if paginate else [
+            driver.find_element(By.TAG_NAME, 'body')
+        ]
+
+        for root in search_roots:
+            page_xpaths = (
+                f".//a[normalize-space(text())='{next_page}']",
+                f".//li[not(contains(@class,'active')) and not(contains(@class,'disabled'))]"
+                f"//a[normalize-space(text())='{next_page}']",
+            )
+            for xpath in page_xpaths:
+                try:
+                    for link in root.find_elements(By.XPATH, xpath):
+                        result = _try_click(link, next_page)
+                        if result:
+                            return result
+                except Exception:
+                    continue
+
+        if paginate:
+            next_xpaths = (
+                ".//a[contains(@class,'paginate_button') and contains(@class,'next')]",
+                ".//li[not(contains(@class,'disabled'))]"
+                "//a[normalize-space(text())='>' or normalize-space(text())='›']",
+                ".//a[normalize-space(text())='Next' or normalize-space(text())='next']",
+            )
+            for xpath in next_xpaths:
+                try:
+                    for btn in paginate.find_elements(By.XPATH, xpath):
+                        txt = (btn.text or '').strip()
+                        if txt == '»':
+                            continue
+                        result = _try_click(btn, next_page)
+                        if result:
+                            return result
+                except Exception:
+                    continue
+
+        return None
+
+    def _set_fetch_requests_ui_busy(self, busy):
+        """Enable/disable Fetch Requests button while a fetch is running."""
+        def _apply():
+            state = 'disabled' if busy else 'normal'
+            btn = getattr(self, 'fetch_requests_btn', None)
+            if btn:
+                try:
+                    btn.config(state=state)
+                except Exception:
+                    pass
+
+        self.root.after(0, _apply)
+
     def fetch_request_list(self):
         """Fetch request list from MANAK portal"""
         # Check license before API operations
@@ -4832,12 +5346,19 @@ class ManakDesktopApp:
         if not self.reception_driver and (not self.driver or not self.logged_in):
              messagebox.showwarning("Not Ready", "Please open browser (QM or Reception) and login first")
              return
-            
+
+        with self._fetch_request_list_lock:
+            if self._fetch_request_list_running:
+                self.log("⚠️ Fetch already in progress — please wait...", 'acknowledge')
+                return
+            self._fetch_request_list_running = True
+
+        self._set_fetch_requests_ui_busy(True)
         self.log("🔍 Fetching request list...", 'acknowledge')
         threading.Thread(target=self._fetch_request_list_worker, daemon=True).start()
         
     def _fetch_request_list_worker(self):
-        """Worker thread for fetching request list (with pagination)."""
+        """Worker thread for fetching the current request list page only."""
         loading_dialog = None
         try:
             driver = self._portal_driver_for_request_list()
@@ -4858,112 +5379,53 @@ class ManakDesktopApp:
             if 'assayingah_list' not in current_url or 'hmtype=hmrd' not in current_url:
                 loading_dialog.update_status("Navigating to request list page...")
                 driver.get(request_list_url)
+                table_wait = 15
             else:
                 loading_dialog.update_status("Using open request list page...")
+                table_wait = 5
 
             loading_dialog.update_status("Waiting for request table...")
-            WebDriverWait(driver, 20).until(
-                EC.presence_of_element_located((By.TAG_NAME, "table"))
+            WebDriverWait(driver, table_wait).until(
+                EC.presence_of_element_located((
+                    By.XPATH,
+                    "//table[.//*[contains(text(),'Request No') or contains(text(),'Request No.')]]"
+                    "//tr[td]",
+                ))
             )
-            try:
-                WebDriverWait(driver, 15).until(
-                    EC.presence_of_element_located((
-                        By.XPATH,
-                        "//table[.//*[contains(text(),'Request No') or contains(text(),'Request No.')]]"
-                        "//tr[td]",
-                    ))
-                )
-            except Exception:
-                pass
-            try:
-                WebDriverWait(driver, 15).until(
-                    EC.presence_of_element_located((
-                        By.XPATH,
-                        "//table//a[contains(translate(normalize-space(.),"
-                        "'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'),'acknowledge')]",
-                    ))
-                )
-            except Exception:
-                pass
-            time.sleep(1.5)
 
-            all_requests = []
-            current_page = 1
-            max_pages = 20
+            loading_dialog.update_status("Parsing request list...")
+            self.log("📄 Processing request list...", 'acknowledge')
 
-            while current_page <= max_pages:
-                loading_dialog.update_status(f"Parsing page {current_page}...")
-                self.log(f"📄 Processing list page {current_page}...", 'acknowledge')
-
-                request_table = self._find_received_requests_table(driver)
-                if not request_table:
-                    if current_page == 1:
-                        raise Exception(
-                            "Request table not found — ensure you are logged in and on "
-                            "'List of Received Request - Hallmarking'"
-                        )
-                    break
-
-                page_requests = self._parse_received_requests_from_table(request_table)
-                for req in page_requests:
-                    jeweller_state = ''
-                    jeweller_info = self._lookup_jeweller_by_name(req.get('jeweller_name', ''))
-                    if jeweller_info:
-                        jeweller_state = (
-                            jeweller_info.get('State') or jeweller_info.get('state') or ''
-                        )
-                    if not jeweller_state:
-                        jeweller_state = self._infer_state_from_address(
-                            req.get('jeweller_address', '')
-                        )
-                    req['jeweller_state'] = jeweller_state
-
-                all_requests.extend(page_requests)
-                self.log(
-                    f"✅ Page {current_page}: {len(page_requests)} requests "
-                    f"(total {len(all_requests)})",
-                    'acknowledge',
+            request_table = self._find_received_requests_table(driver)
+            if not request_table:
+                raise Exception(
+                    "Request table not found — ensure you are logged in and on "
+                    "'List of Received Request - Hallmarking'"
                 )
 
-                next_button = None
-                for xpath in (
-                    "//a[contains(text(),'Next') or contains(text(),'next') or contains(text(),'»')]",
-                    "//a[contains(@class,'next')]",
-                    f"//a[normalize-space(text())='{current_page + 1}']",
-                ):
-                    try:
-                        next_button = driver.find_element(By.XPATH, xpath)
-                        if next_button.is_displayed():
-                            break
-                        next_button = None
-                    except Exception:
-                        continue
+            page_requests = self._parse_received_requests_from_table(request_table)
+            for req in page_requests:
+                req['jeweller_state'] = self._infer_state_from_address(
+                    req.get('jeweller_address', '')
+                )
 
-                if next_button and next_button.is_enabled():
-                    btn_class = (next_button.get_attribute('class') or '').lower()
-                    if 'disabled' not in btn_class:
-                        next_button.click()
-                        time.sleep(1.5)
-                        current_page += 1
-                        continue
-                break
+            requests = page_requests
+            self.log(
+                f"✅ Found {len(requests)} requests on current page",
+                'acknowledge',
+            )
 
-            requests = all_requests
+            # Show results immediately — do not wait for other pages
             self.root.after(0, self._update_request_list_ui, requests)
 
             loading_dialog.update_status("Done!")
             loading_dialog.update_message(f"Found {len(requests)} requests")
-            time.sleep(0.5)
             loading_dialog.close()
 
             if requests:
                 self.log(
-                    f"✅ Successfully fetched {len(requests)} requests from {current_page} page(s)",
+                    f"✅ Loaded {len(requests)} requests into list",
                     'acknowledge',
-                )
-                messagebox.showinfo(
-                    "Success",
-                    f"✅ Found {len(requests)} requests to acknowledge!",
                 )
             else:
                 self.log("⚠️ No requests found to acknowledge", 'acknowledge')
@@ -4979,6 +5441,10 @@ class ManakDesktopApp:
                 loading_dialog.close()
             self.log(f"❌ Error fetching request list: {str(e)}", 'acknowledge')
             messagebox.showerror("Error", f"Error fetching request list: {str(e)}")
+        finally:
+            with self._fetch_request_list_lock:
+                self._fetch_request_list_running = False
+            self._set_fetch_requests_ui_busy(False)
             
     def _update_request_list_ui(self, requests):
         """Update the request list UI with fetched data"""
@@ -5160,23 +5626,9 @@ class ManakDesktopApp:
         if not jeweller_name or not hasattr(self, 'jeweller_api_url_var'):
             return None
         try:
-            import requests
-            url = self.jeweller_api_url_var.get().strip()
-            if not url:
+            items = self._load_jewellers_cache()
+            if not items:
                 return None
-            firm_id = 2
-            if hasattr(self, 'license_manager') and self.license_manager:
-                try:
-                    firm_id = int(getattr(self.license_manager, 'firm_id', 2) or 2)
-                except (TypeError, ValueError):
-                    pass
-            sep = '&' if '?' in url else '?'
-            url = f"{url}{sep}firm_id={firm_id}"
-            resp = requests.get(url, timeout=15)
-            if resp.status_code != 200:
-                return None
-            data = resp.json()
-            items = data if isinstance(data, list) else data.get('data', data.get('jewellers', []))
             target = jeweller_name.strip().upper()
             for j in items:
                 name = str(j.get('Jewellers_Name', j.get('name', ''))).strip().upper()
@@ -5185,6 +5637,36 @@ class ManakDesktopApp:
         except Exception as e:
             self.log(f"⚠️ Jeweller lookup failed: {e}", 'acknowledge')
         return None
+
+    def _load_jewellers_cache(self):
+        """Fetch jeweller list once and reuse for lookups."""
+        cache = getattr(self, '_jewellers_cache', None)
+        if cache is not None:
+            return cache
+
+        self._jewellers_cache = []
+        try:
+            import requests
+            url = self.jeweller_api_url_var.get().strip()
+            if not url:
+                return self._jewellers_cache
+            firm_id = 2
+            if hasattr(self, 'license_manager') and self.license_manager:
+                try:
+                    firm_id = int(getattr(self.license_manager, 'firm_id', 2) or 2)
+                except (TypeError, ValueError):
+                    pass
+            sep = '&' if '?' in url else '?'
+            url = f"{url}{sep}firm_id={firm_id}"
+            resp = requests.get(url, timeout=8)
+            if resp.status_code != 200:
+                return self._jewellers_cache
+            data = resp.json()
+            items = data if isinstance(data, list) else data.get('data', data.get('jewellers', []))
+            self._jewellers_cache = items or []
+        except Exception:
+            self._jewellers_cache = []
+        return self._jewellers_cache
 
     def _infer_state_from_address(self, address):
         """Infer Indian state from address text or pincode when State column is missing."""
@@ -5235,6 +5717,8 @@ class ManakDesktopApp:
                 col['rec_qty'] = i
             elif 'declared purity' in h or (h == 'purity' or h.endswith(' purity')):
                 col['purity'] = i
+            elif 'tag id' in h or ('tag' in h and 'id' in h):
+                col['tag_id'] = i
             elif 'observed' in h and 'weight' in h:
                 col['observed_weight'] = i
             elif 'total weight' in h and 'article' in h:
@@ -5750,8 +6234,8 @@ class ManakDesktopApp:
                 except Exception as e:
                     self.log(f"⚠️ Could not fill Tag Prefix: {str(e)}", 'acknowledge')
             
-            # Auto-fill quantity and weight if enabled
-            if self.auto_fill_qty_weight_var.get():
+            # Fill declaration page before Add (received qty / category weight)
+            if self.auto_fill_qty_weight_var.get() or self.fill_tag_weight_excel_var.get():
                 self._auto_fill_quantity_and_weight(driver)
             else:
                 self.log("ℹ️ Auto-fill quantity/weight is disabled", 'acknowledge')
@@ -5894,7 +6378,23 @@ class ManakDesktopApp:
                 self.log("🔄 Redirected to accept page, accepting all items...", 'acknowledge')
                 
                 # Wait for page to fully load
-                time.sleep(1.0) 
+                time.sleep(1.0)
+                try:
+                    WebDriverWait(driver, 10).until(
+                        EC.presence_of_element_located((
+                            By.XPATH,
+                            "//th[contains(translate(., "
+                            "'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'), 'accept')"
+                            " or contains(translate(., "
+                            "'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'), 'tag id')]",
+                        ))
+                    )
+                except Exception:
+                    pass
+
+                if self.fill_tag_weight_excel_var.get():
+                    if not self._apply_tag_weight_excel_after_add(driver, request):
+                        return False
                 
                 select_all_clicked = False
                 
@@ -6068,6 +6568,284 @@ class ManakDesktopApp:
         except Exception as e:
             self.log(f"❌ Error in acknowledge workflow: {str(e)}", 'acknowledge')
             return False
+
+    def _apply_tag_weight_excel_after_add(self, driver, request):
+        """After Add: in-app dialog to download template and upload filled Excel."""
+        tag_rows = self._collect_acknowledge_tag_rows(driver)
+        if not tag_rows:
+            messagebox.showwarning(
+                "Tag Weight Excel",
+                "No tag rows found on this page.\n\n"
+                "Ensure Add completed and Tag Id column is visible.",
+            )
+            return False
+
+        self.log(f"📂 Tag weight dialog — {len(tag_rows)} tag(s) found", 'acknowledge')
+        excel_path = self._show_tag_weight_excel_dialog(
+            tag_rows,
+            request_no=request.get('request_no', ''),
+            tag_prefix=request.get('tag_prefix', ''),
+        )
+        if not excel_path:
+            self.log("⚠️ Tag weight Excel cancelled", 'acknowledge')
+            return False
+
+        tag_weights = self._parse_tag_weight_excel(excel_path)
+        if not tag_weights:
+            messagebox.showwarning(
+                "Tag Weight Excel",
+                "No tag/weight rows found in the uploaded Excel file.\n\n"
+                "Fill the Weight (Gms) column and upload again.",
+            )
+            return False
+
+        filled = self._fill_tag_weights_from_excel(driver, tag_weights)
+        if filled <= 0:
+            messagebox.showwarning(
+                "Tag Weight Excel",
+                "Could not match any tags from the Excel file to this request table.",
+            )
+            return False
+
+        self.log(f"✅ Filled {filled} tag weight(s) from Excel", 'acknowledge')
+        return True
+
+    def _show_tag_weight_excel_dialog(self, tag_rows, request_no='', tag_prefix=''):
+        """Show in-app download/upload modal on UI thread."""
+        result = {'path': None}
+        done = threading.Event()
+
+        def _show():
+            try:
+                dlg = TagWeightExcelDialog(
+                    self.root, tag_rows, request_no=request_no, tag_prefix=tag_prefix
+                )
+                result['path'] = dlg.run()
+            finally:
+                done.set()
+
+        self.root.after(0, _show)
+        done.wait(timeout=600)
+        return result['path']
+
+    def _collect_acknowledge_tag_rows(self, driver):
+        """Read tag ids and item info from the post-Add acknowledge table."""
+        table, headers, col, data_rows = self._find_acknowledge_declaration_table(driver)
+        if not table or not data_rows:
+            return []
+
+        if 'tag_id' not in col:
+            for i, raw in enumerate(headers):
+                h = (raw or '').strip().lower()
+                if 'tag' in h and 'id' in h:
+                    col['tag_id'] = i
+                    break
+
+        rows = []
+        for idx, row in enumerate(data_rows, 1):
+            try:
+                cells = row.find_elements(By.TAG_NAME, 'td')
+                if not cells:
+                    continue
+
+                def cell_at(key, default_idx):
+                    cidx = col.get(key, default_idx)
+                    if cidx is None or cidx >= len(cells):
+                        return ''
+                    return self._cell_text_or_input(cells[cidx])
+
+                tag_id = cell_at('tag_id', 4)
+                if not tag_id:
+                    continue
+
+                rows.append({
+                    'sno': cell_at('sno', 0) or str(idx),
+                    'tag_id': tag_id,
+                    'category': cell_at('category', 1),
+                    'qty': cell_at('qty', 2),
+                    'purity': cell_at('purity', 3),
+                })
+            except Exception:
+                continue
+        return rows
+
+    @staticmethod
+    def _normalize_tag_key(tag_value):
+        return str(tag_value or '').strip().lower()
+
+    def _find_tag_weight_excel_columns(self, headers):
+        """Detect tag and weight column indexes from Excel header row."""
+        tag_col = None
+        wt_col = None
+        for i, raw in enumerate(headers):
+            h = str(raw or '').strip().lower()
+            if tag_col is None and (
+                'tag id' in h
+                or ('tag' in h and 'id' in h)
+                or h in ('tag', 'ahc tag', 'tag no', 'tag no.')
+            ):
+                tag_col = i
+            elif wt_col is None and (
+                'weight' in h
+                or h in ('wt', 'wt.', 'gms', 'weight gms', 'weight of article')
+            ):
+                wt_col = i
+        if tag_col is None:
+            tag_col = 0
+        if wt_col is None:
+            wt_col = 1 if tag_col == 0 else 0
+        return tag_col, wt_col
+
+    def _parse_tag_weight_excel(self, file_path):
+        """Parse Excel into {tag_id: weight} mapping."""
+        tag_weights = {}
+        ext = os.path.splitext(file_path)[1].lower()
+
+        def _add_row(tag_raw, weight_raw):
+            tag_key = self._normalize_tag_key(tag_raw)
+            if not tag_key:
+                return
+            try:
+                weight = float(str(weight_raw).replace(',', '').strip())
+            except (TypeError, ValueError):
+                return
+            if weight <= 0:
+                return
+            tag_weights[tag_key] = weight
+
+        def _parse_data_rows(all_rows):
+            if not all_rows:
+                return
+            header_idx = 0
+            tag_col = 0
+            wt_col = 1
+            for i, row in enumerate(all_rows[:12]):
+                headers = [str(c or '').strip() for c in row]
+                if not any(headers):
+                    continue
+                tc, wc = self._find_tag_weight_excel_columns(headers)
+                joined = ' '.join(h.lower() for h in headers)
+                if 'tag' in joined and 'weight' in joined:
+                    header_idx = i
+                    tag_col, wt_col = tc, wc
+                    break
+            else:
+                headers = [str(c or '').strip() for c in all_rows[0]]
+                tag_col, wt_col = self._find_tag_weight_excel_columns(headers)
+
+            for row in all_rows[header_idx + 1:]:
+                if not row:
+                    continue
+                tag_val = row[tag_col] if tag_col < len(row) else None
+                wt_val = row[wt_col] if wt_col < len(row) else None
+                _add_row(tag_val, wt_val)
+
+        try:
+            if ext == '.xls':
+                import xlrd
+                book = xlrd.open_workbook(file_path)
+                sheet = book.sheet_by_index(0)
+                all_rows = [
+                    [sheet.cell_value(r, c) for c in range(sheet.ncols)]
+                    for r in range(sheet.nrows)
+                ]
+                _parse_data_rows(all_rows)
+            else:
+                from openpyxl import load_workbook
+                wb = load_workbook(file_path, read_only=True, data_only=True)
+                ws = wb.active
+                all_rows = list(ws.iter_rows(values_only=True))
+                wb.close()
+                _parse_data_rows(all_rows)
+        except Exception as e:
+            self.log(f"❌ Failed to read tag weight Excel: {e}", 'acknowledge')
+            messagebox.showerror("Tag Weight Excel", f"Could not read Excel file:\n{e}")
+        return tag_weights
+
+    def _find_row_weight_input(self, row):
+        """Find editable weight input in an acknowledge table row."""
+        selectors = (
+            'input.totItemCatgWeight',
+            'input.weightCls',
+            'input.itemWeightIndidual',
+        )
+        for selector in selectors:
+            try:
+                for inp in row.find_elements(By.CSS_SELECTOR, selector):
+                    if inp.is_displayed() and inp.get_attribute('type') != 'hidden':
+                        return inp
+            except Exception:
+                continue
+        try:
+            for inp in row.find_elements(By.XPATH, ".//input[@type='text' or @type='number']"):
+                name = (inp.get_attribute('name') or '').lower()
+                cls = (inp.get_attribute('class') or '').lower()
+                if inp.is_displayed() and ('weight' in name or 'weight' in cls):
+                    return inp
+        except Exception:
+            pass
+        return None
+
+    def _fill_tag_weights_from_excel(self, driver, tag_weights):
+        """Fill Weight of Article inputs by matching Tag Id (AHC) from Excel."""
+        if not tag_weights:
+            return 0
+
+        table, headers, col, data_rows = self._find_acknowledge_declaration_table(driver)
+        if not table or not data_rows:
+            self.log("⚠️ Item declaration table not found for tag weight fill", 'acknowledge')
+            return 0
+
+        if 'tag_id' not in col:
+            for i, raw in enumerate(headers):
+                h = (raw or '').strip().lower()
+                if 'tag' in h and 'id' in h:
+                    col['tag_id'] = i
+                    break
+
+        filled = 0
+        unmatched_tags = []
+        for row in data_rows:
+            try:
+                cells = row.find_elements(By.TAG_NAME, 'td')
+                if not cells:
+                    continue
+
+                tag_text = ''
+                if 'tag_id' in col and col['tag_id'] < len(cells):
+                    tag_text = self._cell_text_or_input(cells[col['tag_id']])
+                if not tag_text:
+                    continue
+
+                tag_key = self._normalize_tag_key(tag_text)
+                weight = tag_weights.get(tag_key)
+                if weight is None:
+                    for excel_tag, excel_wt in tag_weights.items():
+                        if tag_key.endswith(excel_tag) or excel_tag.endswith(tag_key):
+                            weight = excel_wt
+                            break
+                if weight is None:
+                    unmatched_tags.append(tag_text)
+                    continue
+
+                weight_input = self._find_row_weight_input(row)
+                if not weight_input:
+                    unmatched_tags.append(tag_text)
+                    continue
+
+                self._portal_set_input_value(driver, weight_input, f"{weight:.3f}".rstrip('0').rstrip('.'))
+                filled += 1
+                self.log(f"  🏷️ {tag_text} → {weight}g", 'acknowledge')
+            except Exception:
+                continue
+
+        self._sync_observed_net_totals(driver)
+        if unmatched_tags:
+            self.log(
+                f"⚠️ No Excel weight for tag(s): {', '.join(unmatched_tags[:8])}",
+                'acknowledge',
+            )
+        return filled
             
     def _auto_fill_quantity_and_weight(self, driver=None):
         """Auto-fill quantity and weight fields from declaration table"""
